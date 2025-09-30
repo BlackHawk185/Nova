@@ -5,6 +5,7 @@ const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 const BASE_ALLOWED_ACTIONS = new Set([
   "send_email",
+  "notify_owner",
   "check_email",
   "search_email",
   "mark_spam",
@@ -20,7 +21,7 @@ const BASE_ALLOWED_ACTIONS = new Set([
 ]);
 
 const EMAIL_CONTEXT_ACTIONS = new Set([
-  "send_email",
+  "notify_owner",
   "search_email",
   "mark_spam",
   "delete_email",
@@ -210,18 +211,15 @@ export default class NovaBrain {
         delete result.action;
       }
       
-      // CRITICAL: If we have a response but no action, Nova likely forgot to choose send_email
+      // CRITICAL: If we have a response but no action, Nova likely forgot to choose notify_owner
       // This violates the dual action sets rule - responses need delivery mechanisms
       console.warn(`⚠️ Nova provided response without delivery action. Response: "${result.response?.substring(0, 100)}..."`);
       
-      // For scheduled reminders or direct user communication, default to send_email
+      // For scheduled reminders or direct user communication, default to notify_owner
       if (result.response && actionContext !== 'email') {
-        console.log(`🔧 Auto-adding send_email action for response delivery`);
-        result.action = 'send_email';
-        result.to = process.env.MY_NUMBER ? `${process.env.MY_NUMBER}@msg.fi.google.com` : 'stephen@valenceapp.net';
-        result.subject = 'Nova Update';
-        result.body = result.response;
-        result.account = 'nova-sms';
+        console.log(`🔧 Auto-adding notify_owner action for response delivery`);
+        result.action = 'notify_owner';
+        result.message = result.response;
       }
     }
 

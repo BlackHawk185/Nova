@@ -135,7 +135,7 @@ export default class SchedulingService {
             
             console.log("Nova waking up for:", wakeupData.task);
             
-            const followUpPrompt = `SCHEDULED REMINDER: You previously scheduled this task: "${wakeupData.task}". Context: ${wakeupData.context}. Originally requested at: ${wakeupData.originalTime}. This is the follow-up you committed to. Fulfill the task now by delivering your response to Stephen (use send_email action to nova-sms account) and reference why you're contacting him (e.g., "As requested..." or "You asked me to...").`;
+            const followUpPrompt = `SCHEDULED REMINDER: You previously scheduled this task: "${wakeupData.task}". Context: ${wakeupData.context}. Originally requested at: ${wakeupData.originalTime}. This is the follow-up you committed to. Fulfill the task now by delivering your response to Stephen (use notify_owner action) and reference why you're contacting him (e.g., "As requested..." or "You asked me to...").`;
             
             // Call the callback function to process the wakeup
             if (novaCallback) {

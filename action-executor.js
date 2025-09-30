@@ -1,3 +1,6 @@
+import config from "./config.js";
+import EmailFormatter from "./email-formatter.js";
+
 const DEFAULT_EMAIL_LIMIT = 5;
 
 function normalizePhone(value) {
@@ -15,6 +18,7 @@ export default class ActionExecutor {
 
 		this.actionHandlers = {
 			send_email: this.handleSendEmail.bind(this),
+			notify_owner: this.handleNotifyOwner.bind(this),
 			check_email: this.handleCheckEmail.bind(this),
 			search_email: this.handleSearchEmail.bind(this),
 			mark_spam: this.handleMarkSpam.bind(this),
@@ -86,6 +90,21 @@ export default class ActionExecutor {
 		return { email: result };
 	}
 
+	async handleNotifyOwner(plan) {
+		// Notify Stephen via nova-sms account (email-to-SMS gateway)
+		const message = plan.message || plan.body || plan.response;
+		if (!message) throw new Error("notify_owner requires a 'message' field");
+
+		const result = await this.emailService.sendEmail({
+			to: process.env.MY_NUMBER ? `${process.env.MY_NUMBER}@msg.fi.google.com` : 'stephen@valenceapp.net',
+			subject: 'Nova Update',
+			body: message,
+			accountId: 'nova-sms'
+		});
+
+		return { notification: result };
+	}
+
 	async handleCheckEmail(plan) {
 		const accountId = this.resolveAccountId(plan.account);
 		if (!accountId) throw new Error("No email account available for check_email");
@@ -93,7 +112,7 @@ export default class ActionExecutor {
 		const limit = Number.isInteger(plan.limit) ? plan.limit : DEFAULT_EMAIL_LIMIT;
 		const emails = await this.emailService.getRecentEmails(accountId, limit);
 
-		const summary = this.summarizeEmails(emails);
+		const summary = EmailFormatter.formatEmailList(emails, { limit: DEFAULT_EMAIL_LIMIT });
 		
 		if (summary) {
 			await this.notifyOwner(summary, { force: true });
@@ -128,7 +147,10 @@ export default class ActionExecutor {
 			results = (recent || []).filter(e => set.has(e.seqno)).sort((a, b) => b.seqno - a.seqno);
 		}
 
-		const summary = this.summarizeEmails(results, { includePreview: true });
+		const summary = EmailFormatter.formatEmailList(results, { 
+			limit: DEFAULT_EMAIL_LIMIT, 
+			includePreview: true 
+		});
 		
 		// Send the summary to the owner
 		if (summary) {
@@ -281,30 +303,6 @@ export default class ActionExecutor {
 		}
 	}
 
-
-
-	summarizeEmails(emails = [], { includePreview = false } = {}) {
-		if (!emails || emails.length === 0) {
-			return "No matching emails found.";
-		}
-
-		const lines = emails.slice(0, DEFAULT_EMAIL_LIMIT).map((email) => {
-			const subject = email.subject || "(no subject)";
-			const from = email.from || "unknown sender";
-			const dateLabel = email.date ? new Date(email.date).toLocaleString() : "unknown date";
-			let line = `• ${subject} — ${from} (${dateLabel}) [${email.seqno ?? "?"}]`;
-			if (includePreview && email.text) {
-				const preview = email.text.replace(/\s+/g, " ").trim().slice(0, 120);
-				if (preview) {
-					line += `\n    ${preview}${preview.length === 120 ? "…" : ""}`;
-				}
-			}
-			return line;
-		});
-
-		return lines.join("\n");
-	}
-
 	buildUnsubscribeSummary(info) {
 		if (!info) return "Unable to extract unsubscribe options.";
 
@@ -350,197 +348,48 @@ export default class ActionExecutor {
 	}
 
 	async resolveEmailIdentifier(accountId, plan) {
-		const candidateKeys = [
-			"emailId",
-			"emailID",
-			"email_id",
-			"uid",
-			"messageId",
-			"message_id",
-		];
-
-		const fallbackStrings = [];
-
-		for (const key of candidateKeys) {
-			if (Object.prototype.hasOwnProperty.call(plan, key)) {
-				const raw = plan[key];
-				const parsed = this.parseEmailSequence(raw);
-				if (parsed !== null) {
-					return parsed;
-				}
-				if (typeof raw === "string" && raw.trim()) {
-					fallbackStrings.push(raw.trim());
-				}
-			}
-		}
-
+		// Simple, direct email resolution - LLM should provide clean criteria
 		const criteria = {};
-		const addCriterion = (field, value) => {
-			if (typeof value === "string" && value.trim()) {
-				const trimmed = value.trim();
-				if (!criteria[field]) {
-					criteria[field] = trimmed;
-				}
-			}
-		};
-
-		addCriterion("subject", plan.subject);
-		addCriterion("subject", plan.subject_line);
-		addCriterion("subject", plan.emailSubject);
-		addCriterion("subject", plan.title);
 		
-		addCriterion("sender", plan.sender);
-		addCriterion("sender", plan.from);
-		addCriterion("sender", plan.author);
-		addCriterion("sender", plan.fromEmail);
-		addCriterion("sender", plan.fromAddress);
+		// Only accept standard, clear field names
+		if (plan.subject) criteria.subject = plan.subject;
+		if (plan.sender) criteria.sender = plan.sender;
+		if (plan.content) criteria.content = plan.content;
 		
-		addCriterion("content", plan.content);
-		addCriterion("content", plan.snippet);
-		addCriterion("content", plan.body);
-		addCriterion("content", plan.preview);
-		addCriterion("content", plan.text);
-		// Note: removed plan.message as it's now plan.response and shouldn't be used for search criteria
-
-		if (Object.keys(criteria).length === 0 && fallbackStrings.length > 0) {
-			const fallback = fallbackStrings[0];
-			
-			if (this.looksLikeSender(fallback)) {
-				criteria.sender = fallback;
-			} else if (this.looksLikeSubject(fallback)) {
-				criteria.subject = fallback;
-			} else {
-				criteria.content = fallback;
-			}
+		// Accept sequence number directly if provided
+		if (plan.emailId && typeof plan.emailId === 'number') {
+			return plan.emailId;
 		}
 
 		if (Object.keys(criteria).length === 0) {
-			throw new Error("Need email identification (emailId, subject, sender, or content)");
+			throw new Error("Need email identification: provide 'subject', 'sender', or 'content' fields");
 		}
 
-		// Use simple sequence number search - sufficient for all email operations
-		const directResults = await this.emailService.searchEmailsForSeqno(accountId, criteria, 3);
-		if (!directResults || directResults.length === 0) {
-			throw new Error("Unable to locate email matching the provided criteria");
+		// Use email service search - let the logic layer handle the actual search
+		const results = await this.emailService.searchEmailsForSeqno(accountId, criteria, 1);
+		if (!results || results.length === 0) {
+			throw new Error(`No email found matching criteria: ${JSON.stringify(criteria)}`);
 		}
 
-		console.log(`📧 Found ${directResults.length} matches, using seqno ${directResults[0]}`);
-		return directResults[0];
+		console.log(`📧 Found email with seqno ${results[0]} using criteria:`, criteria);
+		return results[0];
 	}
 
-	parseEmailSequence(value) {
-		if (value === undefined || value === null) return null;
-		const trimmed = String(value).trim();
-		if (!trimmed) return null;
-		if (/^\d+$/.test(trimmed)) {
-			return Number.parseInt(trimmed, 10);
-		}
-		return null;
-	}
-
-	looksLikeSender(text) {
-		if (!text || typeof text !== "string") return false;
-		const normalized = text.toLowerCase();
-		
-		// Contains @ symbol (email address)
-		if (normalized.includes("@")) return true;
-		
-		// Common sender patterns
-		const senderPatterns = [
-			/^from\s+/i,
-			/\b(sent by|from|by)\b/i,
-			/\b(support|service|team|noreply|no-reply)\b/i,
-		];
-		
-		return senderPatterns.some(pattern => pattern.test(text));
-	}
-
-	looksLikeSubject(text) {
-		if (!text || typeof text !== "string") return false;
-		const normalized = text.toLowerCase();
-		
-		// Subject-like patterns
-		const subjectPatterns = [
-			/^(re:|fwd?:|subject:)/i,
-			/\b(urgent|important|meeting|reminder|invoice|receipt|confirmation)\b/i,
-			/^[A-Z][a-z]+\s+(meeting|call|update|report)/i,
-		];
-		
-		return subjectPatterns.some(pattern => pattern.test(text));
-	}
-
-	extractEmailCriteria(text) {
-		if (!text || typeof text !== "string") return {};
-		
-		const criteria = {};
-		const normalized = text.toLowerCase();
-		
-		// Extract sender from common patterns
-		const senderMatches = [
-			/\bfrom\s+([a-zA-Z][\w\s@.-]+?)(?:\s+(?:in|out|from|to|about|regarding)|$)/i,
-			/\b(?:email|message)\s+from\s+([a-zA-Z][\w\s@.-]+?)(?:\s|$)/i,
-			/\bsender[:\s]+([a-zA-Z][\w\s@.-]+?)(?:\s|$)/i,
-		];
-		
-		for (const pattern of senderMatches) {
-			const match = text.match(pattern);
-			if (match && match[1]) {
-				const sender = match[1].trim();
-				if (sender.length > 0 && sender.length < 50) {
-					criteria.sender = sender;
-					break;
-				}
-			}
-		}
-		
-		// Extract subject from common patterns
-		const subjectMatches = [
-			/\b(?:subject|titled?|about|regarding)[:\s]+"([^"]+)"/i,
-			/\b(?:subject|titled?|about|regarding)[:\s]+([^,.\n]+)/i,
-			/\bemail\s+titled?\s+"([^"]+)"/i,
-		];
-		
-		for (const pattern of subjectMatches) {
-			const match = text.match(pattern);
-			if (match && match[1]) {
-				const subject = match[1].trim();
-				if (subject.length > 0 && subject.length < 100) {
-					criteria.subject = subject;
-					break;
-				}
-			}
-		}
-		
-		return criteria;
-	}
-
-	resolveAccountId(preferred) {
-		const accounts = this.emailService?.accounts || [];
-		if (accounts.length === 0) {
-			return null;
+	resolveAccountId(accountName) {
+		// Simple account validation - LLM must provide exact account name
+		if (!accountName || typeof accountName !== "string") {
+			const available = this.emailService?.listAccounts()?.map(a => a.id) || [];
+			throw new Error(`Account required. Available: ${available.join(', ')}`);
 		}
 
-		if (!preferred || typeof preferred !== "string") {
-			throw new Error("No email account specified. Available accounts: " + accounts.map(a => a.id).join(', '));
+		const accounts = this.emailService?.listAccounts() || [];
+		const validAccount = accounts.find(a => a.id === accountName);
+		if (!validAccount) {
+			const available = accounts.map(a => a.id);
+			throw new Error(`Account "${accountName}" not found. Available: ${available.join(', ')}`);
 		}
 
-		const normalized = preferred.trim().toLowerCase();
-		if (!normalized) {
-			throw new Error("No email account specified. Available accounts: " + accounts.map(a => a.id).join(', '));
-		}
-
-		// Try to find exact match by email or ID
-		for (const account of accounts) {
-			if (account.id.toLowerCase() === normalized) {
-				return account.id;
-			}
-			if (account.email && account.email.toLowerCase() === normalized) {
-				return account.id;
-			}
-		}
-
-		// No fallback - require exact match
-		throw new Error(`Email account "${preferred}" not found. Available accounts: ${accounts.map(a => a.id).join(', ')}`);
+		return accountName;
 	}
 
 	isOwner(number) {

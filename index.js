@@ -9,6 +9,7 @@ import NovaBrain from "./nova-brain.js";
 import SchedulingService from "./scheduling.js";
 import ActionExecutor from "./action-executor.js";
 import ConversationHistory from "./conversation-history.js";
+import EmailFormatter from "./email-formatter.js";
 import { createRoutes } from "./routes.js";
 
 dotenv.config();
@@ -36,26 +37,20 @@ async function getRecentEmailContext() {
   try {
     // Get recent emails from all accounts to provide context
     const accounts = emailService.listAccounts();
-    let contextSummary = "";
+    const accountsData = [];
     
-    for (const accountId of accounts) {
+    for (const account of accounts) {
       try {
-        const recentEmails = await emailService.getRecentEmails(accountId, 5);
+        const recentEmails = await emailService.getRecentEmails(account.id, 5);
         if (recentEmails && recentEmails.length > 0) {
-          contextSummary += `\n${accountId.toUpperCase()} ACCOUNT:\n`;
-          recentEmails.forEach((email, index) => {
-            const from = email.from || 'Unknown';
-            const subject = email.subject || 'No Subject';
-            const date = email.date ? new Date(email.date).toLocaleDateString() : 'Unknown Date';
-            contextSummary += `${index + 1}. From: ${from} | Subject: "${subject}" | Date: ${date}\n`;
-          });
+          accountsData.push({ accountId: account.id, emails: recentEmails });
         }
       } catch (accountError) {
-        console.warn(`Failed to get recent emails for ${accountId}:`, accountError.message);
+        console.warn(`Failed to get recent emails for ${account.id}:`, accountError.message);
       }
     }
     
-    return contextSummary.trim() || null;
+    return EmailFormatter.buildRecentEmailContext(accountsData);
   } catch (error) {
     console.error("Error getting recent email context:", error.message);
     return null;
@@ -238,47 +233,7 @@ async function handleIncomingEmail({ accountId, email, type }) {
     }
     
     // Unified email processing for all accounts
-    let emailContext;
-    
-    if (email.isThread) {
-      // For email threads, use the combined conversation content
-      emailContext = `EMAIL CONVERSATION THREAD RECEIVED in ${accountId} account:
-Subject: ${email.subject}
-Thread Length: ${email.threadLength} messages
-Conversation:
-${email.text}
-
-AUTONOMOUS EMAIL PROCESSING: You can take these actions:
-1. SEND_SMS: Notify Stephen about this email conversation with details
-2. MARK_SPAM: Mark this email thread as spam if it's clearly promotional/unwanted
-3. SCHEDULE_REMINDER: Schedule yourself to follow up on this conversation later, at a suitable time for Stephen
-
-Examples of good actions:
-- MARK_SPAM for obvious junk/promotional email threads
-- SEND_SMS for important conversations that need immediate attention
-- SCHEDULE_REMINDER for conversations that need follow-up but aren't urgent
-
-Analyze this email conversation and decide the best action with clear reasoning.`;
-    } else {
-      // Single email processing
-      emailContext = `NEW EMAIL RECEIVED in ${accountId} account:
-From: ${email.from}
-Subject: ${email.subject}
-Date: ${email.date}
-Content: ${email.text?.replace(/--[0-9a-f]+/g, '').replace(/Content-Type:[^\n]+/g, '').replace(/boundary="[^"]*"/g, '').trim().substring(0, 500) || 'No content available'}
-
-AUTONOMOUS EMAIL PROCESSING: You can take these actions:
-1. SEND_SMS: Notify Stephen about this email with details
-2. MARK_SPAM: Mark this email as spam if it's clearly promotional/unwanted
-3. SCHEDULE_REMINDER: Schedule yourself to follow up on this email later, at a suitable time for Stephen
-
-Examples of good actions:
-- MARK_SPAM for obvious junk/promotional emails
-- SEND_SMS for important emails that need immediate attention
-- SCHEDULE_REMINDER for emails that need follow-up but aren't urgent
-
-Analyze this email and decide the best action with clear reasoning.`;
-    }
+    const emailContext = EmailFormatter.buildIncomingEmailContext(email, accountId);
     
     console.log(`🧠 Nova analyzing ${email.isThread ? 'email thread' : 'email'} with context:`);
     console.log(`   Sender: ${email.from}`);

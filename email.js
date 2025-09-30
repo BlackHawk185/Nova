@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import Imap from 'imap';
 import { simpleParser } from 'mailparser';
 import { google } from 'googleapis';
+import EmailFormatter from './email-formatter.js';
 
 class UniversalEmailService {
   constructor() {
@@ -183,17 +184,14 @@ class UniversalEmailService {
   async sendEmail(options) {
     const { from, to, subject, body, html, priority = 'normal', accountId } = options;
 
-    // Determine which account to use
-    let selectedAccount;
-    if (accountId) {
-      selectedAccount = this.accounts.find(acc => acc.id === accountId);
-    } else if (from) {
-      // Try to match by email address
-      selectedAccount = this.accounts.find(acc => acc.user.toLowerCase() === from.toLowerCase());
+    // Account must be explicitly specified - no auto-detection
+    if (!accountId) {
+      throw new Error(`Account ID required. Available accounts: ${this.accounts.map(a => a.id).join(', ')}`);
     }
 
+    const selectedAccount = this.accounts.find(acc => acc.id === accountId);
     if (!selectedAccount) {
-      throw new Error(`Cannot determine email account for: ${from || accountId}. Available accounts: ${this.accounts.map(a => a.id).join(', ')}`);
+      throw new Error(`Account "${accountId}" not found. Available accounts: ${this.accounts.map(a => a.id).join(', ')}`);
     }
 
     const transporter = await this.getTransporter(selectedAccount.id);
@@ -421,33 +419,6 @@ class UniversalEmailService {
       name: acc.name,
       email: acc.user
     }));
-  }
-
-  /**
-   * Determine best account for sending based on context
-   */
-  selectAccountForContext(context = '') {
-    const contextLower = context.toLowerCase();
-    
-    // Simple heuristics - you can customize these
-    if (contextLower.includes('work') || contextLower.includes('business')) {
-      const workAccount = this.accounts.find(acc => 
-        acc.id.toLowerCase().includes('work') || 
-        acc.id.toLowerCase().includes('business')
-      );
-      if (workAccount) return workAccount;
-    }
-    
-    if (contextLower.includes('side') || contextLower.includes('hustle')) {
-      const sideAccount = this.accounts.find(acc => 
-        acc.id.toLowerCase().includes('side') || 
-        acc.id.toLowerCase().includes('hustle')
-      );
-      if (sideAccount) return sideAccount;
-    }
-    
-    // No fallback - require explicit account selection
-    throw new Error(`Cannot determine email account for context: "${context}". Available accounts: ${this.accounts.map(a => a.id).join(', ')}`);
   }
 
   /**
@@ -1194,14 +1165,14 @@ class UniversalEmailService {
     const processedEmails = new Set();
     
     emails.forEach(email => {
-      if (processedEmails.has(email.messageId)) return;
+      if (!email.messageId || processedEmails.has(email.messageId)) return;
       
       const thread = [];
       const visited = new Set();
       
       // Find all emails in this thread
       const findRelatedEmails = (currentEmail) => {
-        if (!currentEmail || visited.has(currentEmail.messageId)) return;
+        if (!currentEmail || !currentEmail.messageId || visited.has(currentEmail.messageId)) return;
         
         visited.add(currentEmail.messageId);
         thread.push(currentEmail);
@@ -1209,8 +1180,14 @@ class UniversalEmailService {
         
         // Find emails that reference this one
         emails.forEach(otherEmail => {
-          if (otherEmail.inReplyTo === currentEmail.messageId || 
-              (otherEmail.references && otherEmail.references.includes(currentEmail.messageId))) {
+          const referencesThis = otherEmail.inReplyTo === currentEmail.messageId ||
+            (otherEmail.references && (
+              Array.isArray(otherEmail.references) 
+                ? otherEmail.references.includes(currentEmail.messageId)
+                : otherEmail.references === currentEmail.messageId
+            ));
+          
+          if (referencesThis) {
             findRelatedEmails(otherEmail);
           }
         });
@@ -1221,8 +1198,13 @@ class UniversalEmailService {
         }
         
         if (currentEmail.references) {
-          currentEmail.references.forEach(refId => {
-            if (emailMap.has(refId)) {
+          // Handle references as string or array
+          const refs = Array.isArray(currentEmail.references) 
+            ? currentEmail.references 
+            : [currentEmail.references];
+          
+          refs.forEach(refId => {
+            if (refId && typeof refId === 'string' && emailMap.has(refId)) {
               findRelatedEmails(emailMap.get(refId));
             }
           });
@@ -1254,17 +1236,8 @@ class UniversalEmailService {
         const latestEmail = emailThread[emailThread.length - 1]; // Most recent email
         const threadSubject = latestEmail.subject;
         
-        // Combine all email contents into conversation format
-        let conversationText = `=== EMAIL CONVERSATION THREAD ===\n`;
-        conversationText += `Subject: ${threadSubject}\n`;
-        conversationText += `Total Messages: ${emailThread.length}\n\n`;
-        
-        emailThread.forEach((email, index) => {
-          conversationText += `--- Message ${index + 1} ---\n`;
-          conversationText += `From: ${email.from}\n`;
-          conversationText += `Date: ${email.date}\n`;
-          conversationText += `Content: ${email.text?.replace(/--[0-9a-f]+/g, '').replace(/Content-Type:[^\n]+/g, '').replace(/boundary="[^"]*"/g, '').trim() || 'No content'}\n\n`;
-        });
+        // Use centralized formatting for thread conversation
+        const conversationText = EmailFormatter.formatEmailThread(emailThread);
         
         console.log(`📧 ✅ Processing email thread as single conversation`);
         
