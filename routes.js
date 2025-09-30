@@ -3,93 +3,6 @@ import express from "express";
 export function createRoutes({ runNovaPipeline, actionExecutor, emailService, googleOAuth }) {
   const router = express.Router();
 
-  // === TWILIO SMS/WHATSAPP WEBHOOK ===
-  router.post("/sms", async (req, res) => {
-    const incoming = req.body.Body?.trim();
-    const rawFromNumber = req.body.From;
-    const fromNumber = req.body.From?.replace('whatsapp:', ''); // Remove whatsapp: prefix if present
-    const isWhatsApp = rawFromNumber?.startsWith('whatsapp:');
-    
-    console.log(`📨 ${isWhatsApp ? 'WhatsApp' : 'SMS'} from ${rawFromNumber} (cleaned: ${fromNumber}): "${incoming}"`);
-
-    // Compare cleaned number to MY_NUMBER
-    const myNumber = process.env.MY_NUMBER;
-    if (fromNumber !== myNumber) {
-      console.log(`❌ Unknown number: ${rawFromNumber} (expected: ${myNumber})`);
-      res.send("<Response></Response>");
-      return;
-    }
-
-    try {
-      const pipelineResult = await runNovaPipeline({
-        userInput: incoming,
-        channel: isWhatsApp ? "whatsapp" : "sms",
-        actionContext: "general",
-        metadata: { fromNumber: rawFromNumber },
-      });
-
-      console.log(`💬 ${isWhatsApp ? 'WhatsApp' : 'SMS'} processed`, {
-        action: pipelineResult.response.action,
-        message: pipelineResult.response.message,
-      });
-    } catch (error) {
-      console.error(`❌ ${isWhatsApp ? 'WhatsApp' : 'SMS'} Error:`, error.message);
-      await actionExecutor
-        .executeAction({
-          action: "send_sms",
-          message: `System error occurred: ${error.message}`,
-        })
-        .catch((notifyError) =>
-          console.error("❌ Failed to send error notification:", notifyError.message)
-        );
-    }
-
-    res.send("<Response></Response>");
-  });
-
-  // === TWILIO WHATSAPP WEBHOOK ===
-  router.post("/whatsapp", async (req, res) => {
-    const incoming = req.body.Body?.trim();
-    const rawFromNumber = req.body.From; // Keep raw for logging
-    const fromNumber = req.body.From?.replace('whatsapp:', ''); // Remove whatsapp: prefix
-    
-    console.log(`💬 WhatsApp from ${rawFromNumber} (cleaned: ${fromNumber}): "${incoming}"`);
-
-    // Compare cleaned number to MY_NUMBER
-    const myNumber = process.env.MY_NUMBER;
-    if (fromNumber !== myNumber) {
-      console.log(`❌ Unknown WhatsApp number: ${rawFromNumber} (expected: ${myNumber})`);
-      res.send("<Response></Response>");
-      return;
-    }
-
-    try {
-      const pipelineResult = await runNovaPipeline({
-        userInput: incoming,
-        channel: "whatsapp",
-        actionContext: "general",
-        metadata: { fromNumber: rawFromNumber },
-      });
-
-      console.log("💬 WhatsApp processed", {
-        action: pipelineResult.response.action,
-        message: pipelineResult.response.message,
-      });
-    } catch (error) {
-      console.error(`❌ WhatsApp Error:`, error.message);
-      await actionExecutor
-        .executeAction({
-          action: "send_sms",
-          message: `System error occurred: ${error.message}`,
-        })
-        .catch((notifyError) =>
-          console.error("❌ Failed to send error notification:", notifyError.message)
-        );
-    }
-
-    res.send("<Response></Response>");
-  });
-
   // === GOOGLE OAUTH SETUP ===
   router.get("/auth/google", (req, res) => {
     if (googleOAuth.hasValidTokens()) {
@@ -140,16 +53,6 @@ export function createRoutes({ runNovaPipeline, actionExecutor, emailService, go
       message: googleOAuth.hasValidTokens() 
         ? "Gmail OAuth is configured and ready"
         : "Gmail OAuth setup required - visit /auth/google"
-    });
-  });
-
-  // === HEALTH CHECK ===
-  router.get("/health", (req, res) => {
-    res.json({ 
-      status: "Nova is operational",
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      redis: "Upstash connected"
     });
   });
 

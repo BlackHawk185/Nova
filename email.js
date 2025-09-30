@@ -99,7 +99,9 @@ class UniversalEmailService {
         authType: process.env[`EMAIL${prefix}_AUTH_TYPE`] || 'password',
         clientId: process.env[`EMAIL${prefix}_CLIENT_ID`],
         clientSecret: process.env[`EMAIL${prefix}_CLIENT_SECRET`],
-        refreshToken: process.env[`EMAIL${prefix}_REFRESH_TOKEN`]
+        refreshToken: process.env[`EMAIL${prefix}_REFRESH_TOKEN`],
+        // IMAP IDLE flag
+        useIdle: process.env[`EMAIL${prefix}_USE_IDLE`] === 'true'
       };
 
       // Account is valid if it has either password auth or OAuth2 credentials
@@ -188,13 +190,10 @@ class UniversalEmailService {
     } else if (from) {
       // Try to match by email address
       selectedAccount = this.accounts.find(acc => acc.user.toLowerCase() === from.toLowerCase());
-    } else {
-      // Use first account as default
-      selectedAccount = this.accounts[0];
     }
 
     if (!selectedAccount) {
-      throw new Error(`Cannot determine email account for: ${from || accountId}`);
+      throw new Error(`Cannot determine email account for: ${from || accountId}. Available accounts: ${this.accounts.map(a => a.id).join(', ')}`);
     }
 
     const transporter = await this.getTransporter(selectedAccount.id);
@@ -319,7 +318,7 @@ class UniversalEmailService {
       const imap = await this.getImapClient(accountId);
       const emails = [];
 
-      // Only log the initial connection, not every poll
+      // Only log if needed for debugging
       // console.log(`📧 Connecting to IMAP for account: ${accountId}`);
 
       imap.once('ready', () => {
@@ -447,8 +446,8 @@ class UniversalEmailService {
       if (sideAccount) return sideAccount;
     }
     
-    // Default to first account
-    return this.accounts[0];
+    // No fallback - require explicit account selection
+    throw new Error(`Cannot determine email account for context: "${context}". Available accounts: ${this.accounts.map(a => a.id).join(', ')}`);
   }
 
   /**
@@ -859,92 +858,14 @@ class UniversalEmailService {
   }
 
   /**
-   * Start email monitoring for all email accounts using smart polling
+   * Start email monitoring for all email accounts using IMAP IDLE
    */
   startEmailMonitoring() {
-    console.log('📧 Starting email monitoring for all accounts...');
+    console.log('📧 Starting IMAP IDLE monitoring for all accounts...');
     
     this.accounts.forEach(account => {
-      this.startPollingForAccount(account.id);
-    });
-  }
-
-  /**
-   * Start smart polling for specific account
-   */
-  startPollingForAccount(accountId) {
-    console.log(`📧 Starting smart polling for ${accountId} (15s intervals)`);
-    
-    // Track last seen email count to detect new emails
-    let lastEmailCount = 0;
-    
-    const pollEmails = async () => {
-      try {
-        // Get current email count by checking recent emails
-        const emails = await this.getRecentEmails(accountId, 1);
-        
-        if (emails.length > 0) {
-          const currentTopEmail = emails[0];
-          const currentEmailId = currentTopEmail.seqno;
-          
-          // If this is a new email (higher sequence number than before)
-          if (currentEmailId > lastEmailCount) {
-            console.log(`📧 NEW EMAIL DETECTED: ${accountId} - New ID: ${currentEmailId}, Last: ${lastEmailCount}`);
-            
-            // Calculate how many new emails we have
-            const newEmailCount = currentEmailId - lastEmailCount;
-            
-            // Get the new emails
-            const newEmails = await this.getRecentEmails(accountId, Math.min(newEmailCount, 5));
-            
-    // Process each new email
-            for (const email of newEmails) {
-              if (email.seqno > lastEmailCount) {
-                console.log(`📧 Processing new email: ${email.from} - ${email.subject}`);
-                await this.handleNewEmail(accountId, 1, email);
-                // Small delay to prevent duplicate processing
-                await new Promise(resolve => setTimeout(resolve, 1000));
-              }
-            }
-            
-            // Update baseline after processing
-            lastEmailCount = currentEmailId;
-          }
-          
-          // Always update lastEmailCount to current state to prevent infinite loops
-          if (currentEmailId !== lastEmailCount && currentEmailId < lastEmailCount) {
-            console.log(`📧 Baseline reset: ${accountId} ${lastEmailCount} -> ${currentEmailId} (emails moved/deleted)`);
-            lastEmailCount = currentEmailId;
-          }
-        }
-      } catch (error) {
-        console.error(`📧 Polling error for ${accountId}:`, error.message);
-      }
-    };
-    
-    const resetBaseline = async () => {
-      try {
-        const emails = await this.getRecentEmails(accountId, 1);
-        if (emails.length > 0) {
-          const newBaseline = emails[0].seqno;
-          console.log(`📧 Baseline reset: ${accountId} ${lastEmailCount} -> ${newBaseline}`);
-          lastEmailCount = newBaseline;
-        }
-      } catch (error) {
-        console.error(`📧 Failed to reset baseline for ${accountId}:`, error);
-      }
-    };
-    
-    // Initial check to set baseline
-    resetBaseline();
-    
-    // Poll every 15 seconds (good balance of responsiveness vs efficiency)
-    const intervalId = setInterval(pollEmails, 15000);
-    
-    // Store interval ID and reset function so we can stop it later and reset baseline when needed
-    this.idleConnections.set(accountId, { 
-      intervalId,
-      resetBaseline
+      console.log(`📧 Using IMAP IDLE for ${account.id} (real-time)`);
+      this.startIdleForAccount(account.id);
     });
   }
 
@@ -954,29 +875,223 @@ class UniversalEmailService {
   async handleNewEmail(accountId, numNewMsgs, emailObj = null) {
     try {
       console.log(`📧 Processing ${numNewMsgs} new email(s) from ${accountId}`);
-      
       let emails = [];
-      
       if (emailObj) {
-        // Use provided email object
         emails = [emailObj];
       } else {
-        // Get the latest emails
         emails = await this.getRecentEmails(accountId, numNewMsgs);
       }
-      
       if (emails.length > 0 && this.emailCallback) {
-        // Notify Nova about new emails
         for (const email of emails) {
-          await this.emailCallback({
-            accountId,
-            email,
-            type: 'new_email'
-          });
+          console.log(`📧 Processing email: From="${email.from}" Subject="${email.subject}" Account="${accountId}"`);
+          
+          // Special handling for nova-sms: only process SMS-gateway messages
+          if (accountId === 'nova-sms') {
+            // Accept only Google Fi SMS gateway or whitelisted senders
+            const from = (email.from || '').toLowerCase();
+            console.log(`📧 Checking nova-sms filter: from="${from}"`);
+            
+            if (from.endsWith('@msg.fi.google.com') || from.includes('sms gateway') || from.includes('msg.fi.google.com')) {
+              console.log(`📧 ✅ SMS message accepted from ${email.from}`);
+              await this.emailCallback({
+                accountId,
+                email,
+                type: 'new_message',
+                channel: 'inbox'
+              });
+            } else {
+              console.log(`📧 ❌ Ignoring non-SMS email in nova-sms inbox: from=${email.from}`);
+            }
+          } else {
+            // Normal email processing for other accounts
+            console.log(`📧 ✅ Regular email processing for ${accountId}`);
+            await this.emailCallback({
+              accountId,
+              email,
+              type: 'new_email',
+              channel: accountId
+            });
+          }
         }
+      } else {
+        console.log(`📧 No emails to process or no callback set (emails: ${emails.length}, callback: ${!!this.emailCallback})`);
       }
     } catch (error) {
       console.error(`📧 Error handling new email for ${accountId}:`, error);
+    }
+  }
+
+  /**
+   * Start IMAP IDLE for real-time email detection (for accounts with USE_IDLE=true)
+   */
+  startIdleForAccount(accountId) {
+    const account = this.accounts.find(a => a.id === accountId);
+    if (!account) {
+      console.error(`❌ Account ${accountId} not found for IDLE`);
+      return;
+    }
+
+    console.log(`📧 Starting IMAP IDLE for ${accountId} (real-time)`);
+    this.setupIdleConnection(accountId, account);
+  }
+
+  async setupIdleConnection(accountId, account) {
+    try {
+      const imap = await this.getImapClient(accountId);
+
+      console.log(`📧 Setting up IDLE connection for ${accountId}`);
+
+      imap.once('ready', () => {
+        console.log(`📧 IMAP IDLE connection ready for ${accountId}`);
+        
+        imap.openBox('INBOX', false, (err, box) => {
+          if (err) {
+            console.error(`❌ Failed to open INBOX for ${accountId}:`, err);
+            return;
+          }
+
+          console.log(`📧 INBOX opened for ${accountId}, listening for new mail...`);
+          
+          // Listen for new mail events (this is automatic IDLE)
+          imap.on('mail', (numNewMsgs) => {
+            console.log(`📧 IDLE: ${numNewMsgs} new message(s) detected in ${accountId}`);
+            this.handleNewEmailFromIdle(accountId, numNewMsgs, imap);
+          });
+
+          // Listen for connection events
+          imap.on('close', () => {
+            console.log(`📧 IDLE connection closed for ${accountId}`);
+            // Attempt to reconnect after delay
+            setTimeout(() => {
+              console.log(`📧 Attempting to reconnect IDLE for ${accountId}`);
+              this.startIdleForAccount(accountId);
+            }, 30000);
+          });
+
+          console.log(`📧 IDLE monitoring active for ${accountId}`);
+        });
+      });
+
+      imap.once('error', (err) => {
+        console.error(`❌ IMAP IDLE error for ${accountId}:`, err);
+        // Reconnect after delay
+        setTimeout(() => {
+          console.log(`📧 Reconnecting IDLE after error for ${accountId}`);
+          this.startIdleForAccount(accountId);
+        }, 60000);
+      });
+
+      // Store the IMAP connection
+      this.idleConnections.set(accountId, { 
+        type: 'idle',
+        imap: imap,
+        account: account
+      });
+
+      // Connect to start IDLE monitoring
+      imap.connect();
+      
+    } catch (error) {
+      console.error(`❌ Error setting up IDLE connection for ${accountId}:`, error);
+      console.error(`📧 IDLE monitoring failed for ${accountId} - no fallback available`);
+    }
+  }
+
+  /**
+   * Handle new email detected via IDLE
+   */
+  async handleNewEmailFromIdle(accountId, numNewMsgs, imap) {
+    try {
+      console.log(`📧 Fetching ${numNewMsgs} new emails from ${accountId}`);
+      
+      // Search for recent emails
+      imap.search(['ALL'], (err, results) => {
+        if (err) {
+          console.error(`❌ IDLE search error for ${accountId}:`, err);
+          return;
+        }
+
+        if (results.length === 0) {
+          console.log(`📧 No emails found for ${accountId}`);
+          return;
+        }
+
+        // Get the most recent emails
+        const latestUids = results.slice(-numNewMsgs);
+        console.log(`📧 Fetching emails with UIDs:`, latestUids);
+        
+        const fetch = imap.fetch(latestUids, { bodies: '', markSeen: false });
+        const emails = [];
+        let processedCount = 0;
+        const totalEmails = latestUids.length;
+
+        fetch.on('message', (msg, seqno) => {
+          let emailData = { seqno };
+          
+          msg.on('body', (stream, info) => {
+            let buffer = '';
+            stream.on('data', (chunk) => {
+              buffer += chunk.toString('utf8');
+            });
+            stream.once('end', () => {
+              simpleParser(buffer, (err, parsed) => {
+                if (err) {
+                  console.error(`❌ Failed to parse email for ${accountId}:`, err);
+                } else {
+                  emailData = {
+                    ...emailData,
+                    messageId: parsed.messageId,
+                    inReplyTo: parsed.inReplyTo,
+                    references: parsed.references,
+                    subject: parsed.subject,
+                    from: parsed.from?.text || parsed.from,
+                    to: parsed.to?.text || parsed.to,
+                    date: parsed.date,
+                    text: parsed.text,
+                    html: parsed.html
+                  };
+                  emails.push(emailData);
+                  console.log(`📧 IDLE: Parsed email from ${emailData.from} - Subject: ${emailData.subject}`);
+                }
+                
+                processedCount++;
+                // Process emails after all are parsed
+                if (processedCount === totalEmails) {
+                  console.log(`📧 IDLE: Processed ${emails.length} new emails for ${accountId}`);
+                  
+                  // Group emails by conversation thread
+                  const emailThreads = this.groupEmailsByThread(emails);
+                  
+                  // Process each thread as a unit
+                  emailThreads.forEach((thread, index) => {
+                    setTimeout(() => {
+                      if (thread.length === 1) {
+                        // Single email - process normally
+                        this.handleNewEmail(accountId, 1, thread[0]);
+                      } else {
+                        // Email thread - process as conversation
+                        this.handleEmailThread(accountId, thread);
+                      }
+                    }, index * 500); // Small delay between processing
+                  });
+                }
+              });
+            });
+          });
+        });
+
+        fetch.once('end', () => {
+          // This event fires when fetch is complete, but parsing may still be in progress
+          console.log(`📧 IDLE: Fetch completed for ${accountId}, waiting for email parsing...`);
+        });
+
+        fetch.once('error', (err) => {
+          console.error(`❌ IDLE fetch error for ${accountId}:`, err);
+        });
+      });
+      
+    } catch (error) {
+      console.error(`❌ Error handling IDLE email for ${accountId}:`, error);
     }
   }
 
@@ -1048,36 +1163,131 @@ class UniversalEmailService {
   }
 
   /**
-   * Reset polling baseline after emails are moved/deleted
-   */
-  resetPollingBaseline(accountId) {
-    const connection = this.idleConnections.get(accountId);
-    if (connection && connection.resetBaseline) {
-      console.log(`📧 Resetting polling baseline for ${accountId} after email operation`);
-      connection.resetBaseline();
-    }
-  }
-
-  /**
-   * Stop monitoring for specific account
-   */
-  stopPollingForAccount(accountId) {
-    const connection = this.idleConnections.get(accountId);
-    if (connection && connection.intervalId) {
-      console.log(`📧 Stopping email polling for ${accountId}`);
-      clearInterval(connection.intervalId);
-      this.idleConnections.delete(accountId);
-    }
-  }
-
-  /**
    * Stop all email monitoring
    */
   stopEmailMonitoring() {
     console.log('📧 Stopping all email monitoring...');
     this.idleConnections.forEach((connection, accountId) => {
-      this.stopPollingForAccount(accountId);
+      if (connection.imap) {
+        console.log(`📧 Closing IDLE connection for ${accountId}`);
+        connection.imap.end();
+      }
+      this.idleConnections.delete(accountId);
     });
+  }
+
+  /**
+   * Group emails by conversation thread using message IDs and references
+   */
+  groupEmailsByThread(emails) {
+    const threads = [];
+    const emailMap = new Map();
+    
+    // First pass: create map of all emails by message ID
+    emails.forEach(email => {
+      if (email.messageId) {
+        emailMap.set(email.messageId, email);
+      }
+    });
+    
+    // Second pass: group emails into threads
+    const processedEmails = new Set();
+    
+    emails.forEach(email => {
+      if (processedEmails.has(email.messageId)) return;
+      
+      const thread = [];
+      const visited = new Set();
+      
+      // Find all emails in this thread
+      const findRelatedEmails = (currentEmail) => {
+        if (!currentEmail || visited.has(currentEmail.messageId)) return;
+        
+        visited.add(currentEmail.messageId);
+        thread.push(currentEmail);
+        processedEmails.add(currentEmail.messageId);
+        
+        // Find emails that reference this one
+        emails.forEach(otherEmail => {
+          if (otherEmail.inReplyTo === currentEmail.messageId || 
+              (otherEmail.references && otherEmail.references.includes(currentEmail.messageId))) {
+            findRelatedEmails(otherEmail);
+          }
+        });
+        
+        // Find emails this one references
+        if (currentEmail.inReplyTo && emailMap.has(currentEmail.inReplyTo)) {
+          findRelatedEmails(emailMap.get(currentEmail.inReplyTo));
+        }
+        
+        if (currentEmail.references) {
+          currentEmail.references.forEach(refId => {
+            if (emailMap.has(refId)) {
+              findRelatedEmails(emailMap.get(refId));
+            }
+          });
+        }
+      };
+      
+      findRelatedEmails(email);
+      
+      if (thread.length > 0) {
+        // Sort thread by date
+        thread.sort((a, b) => new Date(a.date) - new Date(b.date));
+        threads.push(thread);
+      }
+    });
+    
+    console.log(`📧 Grouped ${emails.length} emails into ${threads.length} conversation threads`);
+    return threads;
+  }
+
+  /**
+   * Handle an email thread as a single conversation
+   */
+  async handleEmailThread(accountId, emailThread) {
+    try {
+      console.log(`📧 Processing email thread with ${emailThread.length} messages from ${accountId}`);
+      
+      if (this.emailCallback) {
+        // Create a combined email object representing the entire thread
+        const latestEmail = emailThread[emailThread.length - 1]; // Most recent email
+        const threadSubject = latestEmail.subject;
+        
+        // Combine all email contents into conversation format
+        let conversationText = `=== EMAIL CONVERSATION THREAD ===\n`;
+        conversationText += `Subject: ${threadSubject}\n`;
+        conversationText += `Total Messages: ${emailThread.length}\n\n`;
+        
+        emailThread.forEach((email, index) => {
+          conversationText += `--- Message ${index + 1} ---\n`;
+          conversationText += `From: ${email.from}\n`;
+          conversationText += `Date: ${email.date}\n`;
+          conversationText += `Content: ${email.text?.replace(/--[0-9a-f]+/g, '').replace(/Content-Type:[^\n]+/g, '').replace(/boundary="[^"]*"/g, '').trim() || 'No content'}\n\n`;
+        });
+        
+        console.log(`📧 ✅ Processing email thread as single conversation`);
+        
+        // Create a combined email object for the callback
+        const threadEmail = {
+          ...latestEmail,
+          text: conversationText,
+          isThread: true,
+          threadLength: emailThread.length
+        };
+        
+        await this.emailCallback({
+          accountId,
+          email: threadEmail,
+          type: 'email_thread',
+          channel: accountId
+        });
+      } else {
+        console.log(`📧 No callback set for email thread processing`);
+      }
+    } catch (error) {
+      console.error(`📧 Error handling email thread for ${accountId}:`, error);
+    }
   }
 }
 

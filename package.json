@@ -12,8 +12,8 @@
     "ai",
     "assistant",
     "secretary",
-    "sms",
-    "twilio"
+    "email",
+    "google-fi"
   ],
   "author": "Stephen",
   "license": "ISC",
@@ -23,13 +23,13 @@
     "body-parser": "^2.2.0",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
+    "form-data": "^4.0.4",
     "googleapis": "^160.0.0",
     "imap": "^0.8.19",
     "mailparser": "^3.7.4",
     "mem0ai": "^2.1.38",
     "nodemailer": "^7.0.6",
     "open": "^10.2.0",
-    "openai": "^5.23.0",
-    "twilio": "^5.10.1"
+    "openai": "^5.23.0"
   }
 }

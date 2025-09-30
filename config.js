@@ -9,7 +9,6 @@ export const config = {
   upstashUrl: process.env.UPSTASH_REDIS_REST_URL || '',
   upstashToken: process.env.UPSTASH_REDIS_REST_TOKEN || '',
   myNumber: process.env.MY_NUMBER || '',
-  twilioFrom: process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_NUMBER || '',
 };
 
 export function dumpConfigSummary() {
@@ -21,7 +20,6 @@ export function dumpConfigSummary() {
       openai: redacted(config.openaiApiKey),
       mem0: redacted(config.mem0ApiKey),
       upstash: redacted(config.upstashUrl) && redacted(config.upstashToken),
-      twilioFrom: redacted(config.twilioFrom),
       myNumber: redacted(config.myNumber),
     },
   };

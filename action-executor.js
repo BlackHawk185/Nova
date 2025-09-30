@@ -1,7 +1,4 @@
-import twilio from "twilio";
-
 const DEFAULT_EMAIL_LIMIT = 5;
-const DEFAULT_SMS_ACTION = "send_sms";
 
 function normalizePhone(value) {
 	return value ? value.replace(/[^0-9+]/g, "") : "";
@@ -14,15 +11,9 @@ export default class ActionExecutor {
 		this.schedulingService = schedulingService;
 		this.logger = logger;
 
-		const accountSid = process.env.TWILIO_ACCOUNT_SID;
-		const authToken = process.env.TWILIO_AUTH_TOKEN;
-		this.twilioClient = accountSid && authToken ? twilio(accountSid, authToken) : null;
-
 		this.ownerNumber = process.env.MY_NUMBER;
-		this.smsFrom = process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_NUMBER;
 
 		this.actionHandlers = {
-			send_sms: this.handleSendSms.bind(this),
 			send_email: this.handleSendEmail.bind(this),
 			check_email: this.handleCheckEmail.bind(this),
 			search_email: this.handleSearchEmail.bind(this),
@@ -51,8 +42,7 @@ export default class ActionExecutor {
 		if (!handler) {
 			this.logger.warn(`Unsupported action requested: ${actionName}`);
 			await this.notifyOwner(
-				plan.message || `Nova planned unsupported action "${actionName}".`,
-				{ fallback: true }
+				plan.response || `Nova planned unsupported action "${actionName}".`
 			);
 			return { success: false, action: actionName, error: "unsupported_action" };
 		}
@@ -64,30 +54,13 @@ export default class ActionExecutor {
 		} catch (error) {
 			this.logger.error(`Action execution failed for ${actionName}:`, error);
 			await this.notifyOwner(
-				`I hit an error while executing ${actionName}: ${error.message}`,
-				{ fallback: true }
+				`I hit an error while executing ${actionName}: ${error.message}`
 			);
 			return { success: false, action: actionName, error: error.message };
 		}
 	}
 
-	async handleSendSms(plan) {
-		const recipient = plan.to || this.ownerNumber;
-		const body = plan.sms_body || plan.body || plan.message;
 
-		if (!recipient) {
-			throw new Error("send_sms requires a recipient number or MY_NUMBER env variable");
-		}
-		if (!body) {
-			throw new Error("send_sms requires a message body");
-		}
-
-		await this.sendSms(recipient, body);
-		return {
-			deliveredTo: recipient,
-			skipOwnerNotification: this.isOwner(recipient) && !plan.force_owner_update,
-		};
-	}
 
 	async handleSendEmail(plan) {
 		if (!this.emailService) {
@@ -121,10 +94,9 @@ export default class ActionExecutor {
 		const emails = await this.emailService.getRecentEmails(accountId, limit);
 
 		const summary = this.summarizeEmails(emails);
-		const message = plan.message ? `${plan.message}\n\n${summary}` : summary;
-
-		if (message) {
-			await this.notifyOwner(message, { force: true });
+		
+		if (summary) {
+			await this.notifyOwner(summary, { force: true });
 		}
 
 		return { accountId, emails, skipOwnerNotification: true };
@@ -140,10 +112,9 @@ export default class ActionExecutor {
 		if (typeof plan.sender === "string" && plan.sender.trim()) criteria.sender = plan.sender.trim();
 		if (typeof plan.content === "string" && plan.content.trim()) criteria.content = plan.content.trim();
 
-		// As a fallback, try to extract criteria from the message text
-		if (Object.keys(criteria).length === 0 && typeof plan.message === "string") {
-			const extracted = this.extractEmailCriteria(plan.message);
-			Object.assign(criteria, extracted);
+		// If no search criteria provided, we can't search effectively
+		if (Object.keys(criteria).length === 0) {
+			throw new Error("search_email requires at least one search criterion (subject, sender, or content)");
 		}
 
 		const limit = Number.isInteger(plan.limit) ? plan.limit : DEFAULT_EMAIL_LIMIT;
@@ -158,10 +129,10 @@ export default class ActionExecutor {
 		}
 
 		const summary = this.summarizeEmails(results, { includePreview: true });
-		const message = plan.message ? `${plan.message}\n\n${summary}` : summary;
-
-		if (message) {
-			await this.notifyOwner(message, { force: true });
+		
+		// Send the summary to the owner
+		if (summary) {
+			await this.notifyOwner(summary, { force: true });
 		}
 
 		return { accountId, results, criteria, skipOwnerNotification: true };
@@ -173,7 +144,6 @@ export default class ActionExecutor {
 
 		const emailId = await this.resolveEmailIdentifier(accountId, plan);
 		await this.emailService.markAsSpam(accountId, emailId);
-		this.emailService.resetPollingBaseline?.(accountId);
 		return { accountId, emailId };
 	}
 
@@ -183,7 +153,6 @@ export default class ActionExecutor {
 
 		const emailId = await this.resolveEmailIdentifier(accountId, plan);
 		await this.emailService.markAsRead(accountId, emailId);
-		this.emailService.resetPollingBaseline?.(accountId);
 		return { accountId, emailId };
 	}
 
@@ -193,7 +162,6 @@ export default class ActionExecutor {
 
 		const emailId = await this.resolveEmailIdentifier(accountId, plan);
 		await this.emailService.markAsUnread(accountId, emailId);
-		this.emailService.resetPollingBaseline?.(accountId);
 		return { accountId, emailId };
 	}
 
@@ -203,7 +171,6 @@ export default class ActionExecutor {
 
 		const emailId = await this.resolveEmailIdentifier(accountId, plan);
 		await this.emailService.deleteEmail(accountId, emailId);
-		this.emailService.resetPollingBaseline?.(accountId);
 		return { accountId, emailId };
 	}
 
@@ -214,7 +181,6 @@ export default class ActionExecutor {
 
 		const emailId = await this.resolveEmailIdentifier(accountId, plan);
 		await this.emailService.moveEmail(accountId, emailId, plan.folder);
-		this.emailService.resetPollingBaseline?.(accountId);
 		return { accountId, emailId, folder: plan.folder };
 	}
 
@@ -224,7 +190,6 @@ export default class ActionExecutor {
 
 		const emailId = await this.resolveEmailIdentifier(accountId, plan);
 		const info = await this.emailService.unsubscribeFromEmail(accountId, emailId);
-		this.emailService.resetPollingBaseline?.(accountId);
 		const summary = this.buildUnsubscribeSummary(info);
 		if (summary) {
 			await this.notifyOwner(summary, { force: true });
@@ -240,10 +205,24 @@ export default class ActionExecutor {
 
 		const task = plan.task || plan.prompt || "Untitled reminder";
 		const context = plan.context || "Scheduled follow-up";
+		const category = plan.category || null;
 		const delayMs = this.parseDelay(plan.when) ?? plan.delayMs ?? plan.delay_ms ?? 15 * 60 * 1000;
 
-		const id = await this.schedulingService.scheduleWakeup(task, delayMs, context);
-		return { task, delayMs, context, id };
+		const id = await this.schedulingService.scheduleWakeup(task, delayMs, context, category);
+		return { task, delayMs, context, category, id };
+	}
+
+	// Helper method for scheduling daily summaries at 6 PM
+	async scheduleDailySummary(task, category = "daily_summary") {
+		if (!this.schedulingService) {
+			throw new Error("Scheduling service not configured");
+		}
+		
+		const delayMs = this.schedulingService.constructor.getDelayUntilSixPM();
+		const context = "Daily summary";
+		
+		const id = await this.schedulingService.scheduleWakeup(task, delayMs, context, category);
+		return { task, delayMs: delayMs, context, category, id };
 	}
 
 	async handleAddTask(plan) {
@@ -251,7 +230,7 @@ export default class ActionExecutor {
 			throw new Error("Memory service not configured");
 		}
 
-		const task = plan.task || plan.message;
+		const task = plan.task || plan.description;
 		if (!task) throw new Error("add_task requires task description");
 
 		await this.memory.addTask(task, plan.due_date || plan.dueDate, plan.priority || "medium");
@@ -264,57 +243,45 @@ export default class ActionExecutor {
 	}
 
 	async notifyOwnerIfNeeded(plan, handlerResult = {}) {
-		if (!plan || !plan.message || !this.ownerNumber) return;
+		if (!plan || !plan.response || !this.ownerNumber) return;
 		if (handlerResult.skipOwnerNotification) return;
 
-		if (plan.action === DEFAULT_SMS_ACTION) {
-			const target = plan.to || this.ownerNumber;
-			if (this.isOwner(target) && !plan.force_owner_update) {
-				return;
-			}
+		// Skip notification if this is an email response to SMS (avoid loops)
+		if (plan.action === 'send_email' && plan.to && plan.to.includes('@msg.fi.google.com')) {
+			console.log('📧 Skipping owner notification to avoid SMS response loop');
+			return;
 		}
 
-		await this.sendSms(this.ownerNumber, plan.message);
+		await this.notifyOwner(plan.response);
 	}
 
-	async notifyOwner(message, { fallback = false, force = false } = {}) {
+	async notifyOwner(message, { force = false } = {}) {
 		if (!message || (!force && !this.ownerNumber)) return;
-		const target = this.ownerNumber || process.env.FALLBACK_OWNER_NUMBER;
-
-		if (!target) {
-			if (fallback) {
-				this.logger.error("No owner number configured for fallback notification");
-			}
-			return;
+		
+		if (!this.ownerNumber) {
+			throw new Error("No owner number configured for notification");
 		}
 
-		await this.sendSms(target, message);
-	}
-
-	async sendSms(to, body) {
-		if (!to) {
-			throw new Error("Missing SMS recipient");
-		}
-		if (!body) {
-			throw new Error("Missing SMS body");
-		}
-
-		if (!this.twilioClient) {
-			console.log("🔇 Twilio not configured - would send WhatsApp message:", { to, body });
-			return;
-		}
-
-		const payload = {
-			from: `whatsapp:${this.smsFrom}`,
-			to: `whatsapp:${to}`,
-			body,
-		};
-
-		await this.twilioClient.messages.create(payload);
-		if (this.logger && typeof this.logger.info === 'function') {
-			this.logger.info("📱 WhatsApp message sent", { to });
+		try {
+			// Send notification via email to Google Fi SMS gateway
+			const googleFiEmail = `${this.ownerNumber}@msg.fi.google.com`;
+			console.log(`📱 Sending owner notification via Google Fi gateway: ${googleFiEmail}`);
+			
+			await this.emailService.sendEmail({
+				accountId: 'nova-sms',
+				to: googleFiEmail,
+				subject: 'Nova Update',
+				body: message
+			});
+			
+			console.log(`✅ Owner notification sent: ${message.substring(0, 50)}...`);
+		} catch (error) {
+			console.error(`❌ Failed to send owner notification:`, error.message);
+			// Don't throw - notification failures shouldn't break the main action
 		}
 	}
+
+
 
 	summarizeEmails(emails = [], { includePreview = false } = {}) {
 		if (!emails || emails.length === 0) {
@@ -433,7 +400,7 @@ export default class ActionExecutor {
 		addCriterion("content", plan.body);
 		addCriterion("content", plan.preview);
 		addCriterion("content", plan.text);
-		addCriterion("content", plan.message);
+		// Note: removed plan.message as it's now plan.response and shouldn't be used for search criteria
 
 		if (Object.keys(criteria).length === 0 && fallbackStrings.length > 0) {
 			const fallback = fallbackStrings[0];
@@ -554,12 +521,12 @@ export default class ActionExecutor {
 		}
 
 		if (!preferred || typeof preferred !== "string") {
-			return accounts[0].id;
+			throw new Error("No email account specified. Available accounts: " + accounts.map(a => a.id).join(', '));
 		}
 
 		const normalized = preferred.trim().toLowerCase();
 		if (!normalized) {
-			return accounts[0].id;
+			throw new Error("No email account specified. Available accounts: " + accounts.map(a => a.id).join(', '));
 		}
 
 		// Try to find exact match by email or ID
@@ -572,8 +539,8 @@ export default class ActionExecutor {
 			}
 		}
 
-		// Fallback to first account
-		return accounts[0].id;
+		// No fallback - require exact match
+		throw new Error(`Email account "${preferred}" not found. Available accounts: ${accounts.map(a => a.id).join(', ')}`);
 	}
 
 	isOwner(number) {

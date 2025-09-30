@@ -31,6 +31,37 @@ const actionExecutor = new ActionExecutor({
   schedulingService,
 });
 
+// Get recent email context to help Nova understand references like "newest email from Ryan"
+async function getRecentEmailContext() {
+  try {
+    // Get recent emails from all accounts to provide context
+    const accounts = emailService.listAccounts();
+    let contextSummary = "";
+    
+    for (const accountId of accounts) {
+      try {
+        const recentEmails = await emailService.getRecentEmails(accountId, 5);
+        if (recentEmails && recentEmails.length > 0) {
+          contextSummary += `\n${accountId.toUpperCase()} ACCOUNT:\n`;
+          recentEmails.forEach((email, index) => {
+            const from = email.from || 'Unknown';
+            const subject = email.subject || 'No Subject';
+            const date = email.date ? new Date(email.date).toLocaleDateString() : 'Unknown Date';
+            contextSummary += `${index + 1}. From: ${from} | Subject: "${subject}" | Date: ${date}\n`;
+          });
+        }
+      } catch (accountError) {
+        console.warn(`Failed to get recent emails for ${accountId}:`, accountError.message);
+      }
+    }
+    
+    return contextSummary.trim() || null;
+  } catch (error) {
+    console.error("Error getting recent email context:", error.message);
+    return null;
+  }
+}
+
 async function runNovaPipeline({
   userInput,
   channel = "sms",
@@ -62,7 +93,15 @@ async function runNovaPipeline({
     const memoryResults = await fetchRelevantMemories(memoryQueryResult.queries || []);
     console.log(`💭 Retrieved ${memoryResults.length} memory snippets`);
     
-    const curatedMemories = await memory.curateMemories(memoryResults);
+    // Use Nova's AI-powered memory curation
+    const curationResult = await novaBrain.curateMemories(memoryResults);
+    const curatedMemories = curationResult.curatedMemories;
+    
+    // Apply memory deletions/updates from curation
+    if (curationResult.memoryOperations) {
+      await applyMemoryUpdates(curationResult.memoryOperations);
+    }
+    
     console.log(`✨ Curated to ${curatedMemories.length} relevant memories`);
 
     console.log(`🤖 Nova reasoning with context:`, {
@@ -79,19 +118,8 @@ async function runNovaPipeline({
       actionContext,
     });
 
-    console.log(`💭 Nova's decision:`, {
-      action: response.action || 'none',
-      message: response.message,
-      confidence: response.confidence,
-      memoryOps: {
-        add: response.memory?.add?.length || 0,
-        update: response.memory?.update?.length || 0,
-        delete: response.memory?.delete?.length || 0
-      }
-    });
-
     const memoryOps = await applyMemoryUpdates(response.memory);
-    await conversationHistory.addToConversationHistory(trimmedInput, response.message);
+    await conversationHistory.addToConversationHistory(trimmedInput, response.response);
 
     const execution = await actionExecutor.executeAction(response);
 
@@ -109,8 +137,11 @@ async function runNovaPipeline({
   } catch (error) {
     console.error("❌ Nova pipeline error:", error);
     await actionExecutor.executeAction({
-      action: "send_sms",
-      message: `Nova hit a snag while processing: ${error.message}`,
+      action: "send_email",
+      to: `${process.env.MY_NUMBER}@msg.fi.google.com`,
+      subject: "Nova Error",
+      body: `Nova hit a snag while processing: ${error.message}`,
+      account: "nova-sms"
     }).catch((notifyError) => {
       console.error("❌ Failed to notify owner about pipeline error:", notifyError);
     });
@@ -200,10 +231,37 @@ async function applyMemoryUpdates(delta = {}) {
 // === INCOMING EMAIL HANDLER ===
 async function handleIncomingEmail({ accountId, email, type }) {
   try {
-    console.log(`📧 NEW EMAIL RECEIVED: From ${email.from} - Subject: ${email.subject}`);
+    if (email.isThread) {
+      console.log(`📧 EMAIL THREAD RECEIVED: ${email.threadLength} messages - Subject: ${email.subject}`);
+    } else {
+      console.log(`📧 NEW EMAIL RECEIVED: From ${email.from} - Subject: ${email.subject}`);
+    }
     
-    // Create detailed context for Nova about the incoming email with limited action set
-    const emailContext = `NEW EMAIL RECEIVED in ${accountId} account:
+    // Unified email processing for all accounts
+    let emailContext;
+    
+    if (email.isThread) {
+      // For email threads, use the combined conversation content
+      emailContext = `EMAIL CONVERSATION THREAD RECEIVED in ${accountId} account:
+Subject: ${email.subject}
+Thread Length: ${email.threadLength} messages
+Conversation:
+${email.text}
+
+AUTONOMOUS EMAIL PROCESSING: You can take these actions:
+1. SEND_SMS: Notify Stephen about this email conversation with details
+2. MARK_SPAM: Mark this email thread as spam if it's clearly promotional/unwanted
+3. SCHEDULE_REMINDER: Schedule yourself to follow up on this conversation later, at a suitable time for Stephen
+
+Examples of good actions:
+- MARK_SPAM for obvious junk/promotional email threads
+- SEND_SMS for important conversations that need immediate attention
+- SCHEDULE_REMINDER for conversations that need follow-up but aren't urgent
+
+Analyze this email conversation and decide the best action with clear reasoning.`;
+    } else {
+      // Single email processing
+      emailContext = `NEW EMAIL RECEIVED in ${accountId} account:
 From: ${email.from}
 Subject: ${email.subject}
 Date: ${email.date}
@@ -212,28 +270,23 @@ Content: ${email.text?.replace(/--[0-9a-f]+/g, '').replace(/Content-Type:[^\n]+/
 AUTONOMOUS EMAIL PROCESSING: You can take these actions:
 1. SEND_SMS: Notify Stephen about this email with details
 2. MARK_SPAM: Mark this email as spam if it's clearly promotional/unwanted
-3. ORGANIZE_EMAIL: Intelligently move this email to an appropriate folder based on content
-4. SCHEDULE_REMINDER: Schedule yourself to follow up on this email later
-
-For ORGANIZE_EMAIL: I'll analyze the email content and available folders to move it to the most appropriate location automatically.
-
-For SCHEDULE_REMINDER, decide the appropriate timeframe based on:
-- Email urgency (immediate, hours, days, weeks)
-- Sender importance (VIP, work contact, unknown, spam)
-- Content type (meeting request, deadline, FYI, promotional)
+3. SCHEDULE_REMINDER: Schedule yourself to follow up on this email later, at a suitable time for Stephen
 
 Examples of good actions:
-- ORGANIZE_EMAIL for newsletters, promotions, work emails that can be automatically filed
 - MARK_SPAM for obvious junk/promotional emails
 - SEND_SMS for important emails that need immediate attention
 - SCHEDULE_REMINDER for emails that need follow-up but aren't urgent
 
 Analyze this email and decide the best action with clear reasoning.`;
+    }
     
-    console.log(`🧠 Nova analyzing email with context:`);
+    console.log(`🧠 Nova analyzing ${email.isThread ? 'email thread' : 'email'} with context:`);
     console.log(`   Sender: ${email.from}`);
     console.log(`   Subject: ${email.subject}`);
     console.log(`   Account: ${accountId}`);
+    if (email.isThread) {
+      console.log(`   Thread Length: ${email.threadLength} messages`);
+    }
     console.log(`   Content: ${email.text?.replace(/--[0-9a-f]+/g, '').replace(/Content-Type:[^\n]+/g, '').replace(/boundary="[^"]*"/g, '').trim().substring(0, 150) || 'No content'}...`);
     console.log(`   Action Context: EMAIL (limited actions)`);
     
@@ -242,12 +295,11 @@ Analyze this email and decide the best action with clear reasoning.`;
       userInput: emailContext,
       channel: "email",
       actionContext: "email",
-      metadata: { accountId, subject: email.subject },
+      metadata: { accountId, subject: email.subject, isThread: email.isThread, threadLength: email.threadLength },
     });
-    
-    console.log(`💭 Nova's decision for email "${email.subject}":`);
+    console.log(`💭 Nova's decision for ${email.isThread ? 'email thread' : 'email'} "${email.subject}":`);
     console.log(`   Action: ${pipelineResult.response.action}`);
-    console.log(`   Message: ${pipelineResult.response.message}`);
+    console.log(`   Message: ${pipelineResult.response.response}`);
     console.log(`   Context: Email processing (restricted actions)`);
     console.log(`   Memory queries: ${JSON.stringify(pipelineResult.memoryQueries)}`);
     

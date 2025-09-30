@@ -46,16 +46,6 @@ class NovaMemory {
   }
 
   async curateMemories(memories, curationInstructions = null) {
-    console.log(`🔍 curateMemories INPUT: ${memories?.length || 0} memories received`);
-    
-    // Debug: if we got memories when we shouldn't have, log them
-    if (memories && memories.length > 0) {
-      console.log(`🔍 Memories received:`, memories.map(m => ({
-        id: m.id || m.memory_id,
-        text: (m.text || m.memory || m.content || '').substring(0, 50) + '...'
-      })));
-    }
-    
     // Optionally, use LLM to decide which memories to keep, update, or delete.
     // This method can be expanded to:
     // - Remove irrelevant or outdated memories
@@ -63,7 +53,6 @@ class NovaMemory {
     // - Return only the most useful memories for prompt context
     // For now, just return all memories as-is.
     
-    console.log(`✨ curateMemories OUTPUT: ${memories?.length || 0} memories returned`);
     return memories;
   }
 

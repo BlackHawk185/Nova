@@ -22,7 +22,7 @@ export default class ConversationHistory {
       // Ensure novaResponse is serializable
       const responseText = typeof novaResponse === 'string' 
         ? novaResponse 
-        : (novaResponse.message || JSON.stringify(novaResponse));
+        : (novaResponse.response || JSON.stringify(novaResponse));
       
       // Add new exchange
       history.push(

@@ -1,10 +1,9 @@
 import OpenAI from "openai";
-import { NOVA_SYSTEM_PROMPT, NOVA_MEMORY_SEARCH_PROMPT } from "./prompt.js";
+import { NOVA_SYSTEM_PROMPT, NOVA_MEMORY_SEARCH_PROMPT, NOVA_MEMORY_CURATION_PROMPT } from "./prompt.js";
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 const BASE_ALLOWED_ACTIONS = new Set([
-  "send_sms",
   "send_email",
   "check_email",
   "search_email",
@@ -21,7 +20,7 @@ const BASE_ALLOWED_ACTIONS = new Set([
 ]);
 
 const EMAIL_CONTEXT_ACTIONS = new Set([
-  "send_sms",
+  "send_email",
   "search_email",
   "mark_spam",
   "delete_email",
@@ -32,7 +31,7 @@ const EMAIL_CONTEXT_ACTIONS = new Set([
   "schedule_reminder"
 ]);
 
-const ERROR_CONTEXT_ACTIONS = new Set(["send_sms"]);
+const ERROR_CONTEXT_ACTIONS = new Set(["send_email"]);
 
 export default class NovaBrain {
   constructor({ model } = {}) {
@@ -71,11 +70,70 @@ export default class NovaBrain {
       ? parsed.queries.filter((q) => typeof q === "string" && q.trim()).map((q) => q.trim())
       : [];
 
-    console.log(`🔍 LLM memory search result:`, parsed);
-
     return {
       queries,
       reasoning: parsed?.reasoning || ""
+    };
+  }
+
+  async curateMemories(memories) {
+    if (!memories || memories.length === 0) {
+      return { curatedMemories: [], memoryOperations: { delete: [], update: [] } };
+    }
+
+    const formattedMemories = this.formatMemories(memories);
+    const payload = `<MEMORIES>\n${formattedMemories}\n</MEMORIES>`;
+
+    console.log(`🧠 Memory curation prompt:`, {
+      memoriesCount: memories.length
+    });
+
+    const response = await this.openai.chat.completions.create({
+      model: this.model,
+      messages: [
+        { role: "system", content: NOVA_MEMORY_CURATION_PROMPT },
+        { role: "user", content: payload }
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.2
+    });
+
+    const result = this.safeJsonParse(response.choices?.[0]?.message?.content);
+    
+    console.log(`🔍 Memory curation result:`, {
+      kept: result?.curated_memories?.length || 0,
+      deleted: result?.memory_operations?.delete?.length || 0,
+      updated: result?.memory_operations?.update?.length || 0,
+      reasoning: result?.reasoning || "No reasoning provided"
+    });
+
+    // Log details of deleted memories
+    if (result?.memory_operations?.delete?.length > 0) {
+      console.log(`🗑️ Memories being deleted:`);
+      result.memory_operations.delete.forEach(deleteId => {
+        const originalMemory = memories.find(m => 
+          m.id === deleteId || m.memory_id === deleteId || m.uuid === deleteId
+        );
+        if (originalMemory) {
+          const text = originalMemory.text || originalMemory.memory || originalMemory.content || 'No text';
+          console.log(`   [${deleteId}] ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`);
+        } else {
+          console.log(`   [${deleteId}] Memory not found in original set`);
+        }
+      });
+    }
+
+    // Log details of updated memories
+    if (result?.memory_operations?.update?.length > 0) {
+      console.log(`✏️ Memories being updated:`);
+      result.memory_operations.update.forEach(update => {
+        console.log(`   [${update.id}] NEW: ${update.text.substring(0, 100)}${update.text.length > 100 ? '...' : ''}`);
+      });
+    }
+
+    return {
+      curatedMemories: result?.curated_memories || memories,
+      memoryOperations: result?.memory_operations || { delete: [], update: [] }
     };
   }
 
@@ -119,18 +177,72 @@ export default class NovaBrain {
 
     const raw = this.safeJsonParse(response.choices?.[0]?.message?.content);
     
-    console.log(`🧠 Raw LLM response:`, raw);
+    // Minimal validation - only security-critical checks
+    const result = raw && typeof raw === "object" ? { ...raw } : {};
     
-    const normalized = this.normalizeResult(raw, actionContext);
+    // Fix nested action structure if present
+    if (result.action && typeof result.action === "object" && result.action.action) {
+      // Flatten nested action: { action: { action: 'mark_spam', ... } } -> { action: 'mark_spam', ... }
+      const actionName = result.action.action;
+      const actionParams = { ...result.action };
+      delete actionParams.action;
+      result.action = actionName;
+      Object.assign(result, actionParams);
+    }
     
-    console.log(`✅ Normalized Nova response:`, {
-      action: normalized.action,
-      message: normalized.message,
-      confidence: normalized.confidence,
-      hasMemoryOps: !!(normalized.memory?.add || normalized.memory?.update || normalized.memory?.delete)
+    // Validate action is allowed in current context
+    if (result.action && typeof result.action === "string") {
+      const allowed = this.getAllowedActionsForContext(actionContext);
+      if (!allowed.has(result.action)) {
+        console.warn(`❌ Action '${result.action}' not allowed in context '${actionContext}', removing action`);
+        delete result.action;
+      }
+    }
+
+    // Enforce dual action sets rule: must have either a direct response OR a schedule_reminder action
+    // If no action or action is 'none', this must be a direct user response
+    if (!result.action || result.action === 'none') {
+      if (!result.response || typeof result.response !== "string") {
+        result.response = "I understand. Let me think about the best way to help.";
+      }
+      // Remove 'none' action - it's not a real action
+      if (result.action === 'none') {
+        delete result.action;
+      }
+      
+      // CRITICAL: If we have a response but no action, Nova likely forgot to choose send_email
+      // This violates the dual action sets rule - responses need delivery mechanisms
+      console.warn(`⚠️ Nova provided response without delivery action. Response: "${result.response?.substring(0, 100)}..."`);
+      
+      // For scheduled reminders or direct user communication, default to send_email
+      if (result.response && actionContext !== 'email') {
+        console.log(`🔧 Auto-adding send_email action for response delivery`);
+        result.action = 'send_email';
+        result.to = process.env.MY_NUMBER ? `${process.env.MY_NUMBER}@msg.fi.google.com` : 'stephen@valenceapp.net';
+        result.subject = 'Nova Update';
+        result.body = result.response;
+        result.account = 'nova-sms';
+      }
+    }
+
+    // Ensure response exists (required field)
+    if (!result.response || typeof result.response !== "string") {
+      result.response = result.action ? 
+        `I'll handle that ${result.action.replace('_', ' ')} for you.` :
+        "I understand. Let me think about the best way to help.";
+    }    // Log the final decision
+    console.log(`💭 Nova's decision:`, {
+      action: result.action || 'none',
+      response: result.response,
+      confidence: result.confidence,
+      memoryOps: {
+        add: result.memory?.add?.length || 0,
+        update: result.memory?.update?.length || 0,
+        delete: result.memory?.delete?.length || 0
+      }
     });
 
-    return normalized;
+    return result;
   }
 
   formatConversation(conversation) {
@@ -159,57 +271,6 @@ export default class NovaBrain {
         return `- [id: ${id}] ${text}`;
       })
       .join("\n");
-  }
-
-  normalizeResult(raw, actionContext) {
-    const result = raw && typeof raw === "object" ? { ...raw } : {};
-
-    if (!result.action || typeof result.action !== "string") {
-      result.action = "send_sms";
-    } else {
-      result.action = result.action.trim();
-    }
-
-    const allowed = this.getAllowedActionsForContext(actionContext);
-    if (!allowed.has(result.action)) {
-      result.action = "send_sms";
-    }
-
-    if (typeof result.message !== "string" || result.message.trim() === "") {
-      result.message = "I'm on it.";
-    } else {
-      result.message = result.message.trim();
-    }
-
-    result.memory = this.normalizeMemoryPayload(result.memory);
-
-    return result;
-  }
-
-  normalizeMemoryPayload(memoryPayload) {
-    const base = {
-      add: [],
-      update: [],
-      delete: []
-    };
-
-    if (!memoryPayload || typeof memoryPayload !== "object") {
-      return base;
-    }
-
-    return {
-      add: Array.isArray(memoryPayload.add)
-        ? memoryPayload.add.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim())
-        : [],
-      update: Array.isArray(memoryPayload.update)
-        ? memoryPayload.update
-            .filter((item) => item && typeof item === "object" && item.id && item.text)
-            .map((item) => ({ id: String(item.id), text: String(item.text).trim() }))
-        : [],
-      delete: Array.isArray(memoryPayload.delete)
-        ? memoryPayload.delete.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim())
-        : []
-    };
   }
 
   getAllowedActionsForContext(context) {
