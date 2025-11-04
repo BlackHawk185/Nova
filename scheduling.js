@@ -1,14 +1,30 @@
 import { Redis } from "@upstash/redis";
+import config from "./config.js";
 
 export default class SchedulingService {
   constructor() {
-    this.redis = Redis.fromEnv();
+    // Use config with hardcoded fallbacks
+    const url = config.upstashUrl || process.env.UPSTASH_REDIS_REST_URL;
+    const token = config.upstashToken || process.env.UPSTASH_REDIS_REST_TOKEN;
+    
+    if (url && token) {
+      this.redis = new Redis({ url, token });
+    } else {
+      console.warn('⚠️ Redis not configured - scheduling will use in-memory fallback');
+      this.redis = null;
+    }
+    
     this.wakeupProcessor = null;
     // Default merge window - can be overridden based on Nova's learned preferences
     this.mergeWindowMs = 2 * 60 * 60 * 1000; // 2 hours default
   }
 
   async scheduleWakeup(task, delayMs, context = "Scheduled follow-up", category = null) {
+    if (!this.redis) {
+      console.warn('⚠️ Redis not available - reminder not persisted');
+      return null;
+    }
+    
     const wakeupTime = Date.now() + delayMs;
     
     // Check for nearby reminders to merge with (regardless of category)
@@ -41,6 +57,8 @@ export default class SchedulingService {
   }
 
   async findNearbyReminder(targetTime) {
+    if (!this.redis) return null;
+    
     // Look for reminders within the merge window
     const windowStart = targetTime - this.mergeWindowMs;
     const windowEnd = targetTime + this.mergeWindowMs;
@@ -139,6 +157,8 @@ export default class SchedulingService {
 
   // Get all pending reminders for debugging/management
   async getPendingReminders() {
+    if (!this.redis) return [];
+    
     const now = Date.now();
     const allTasks = await this.redis.zrange("nova_wakeups", now, "+inf", { byScore: true });
     
@@ -172,6 +192,8 @@ export default class SchedulingService {
   }
 
   async processWakeups(novaCallback) {
+    if (!this.redis) return;
+    
     try {
       const now = Date.now();
       // Get all tasks that should wake up now using ZRANGE BYSCORE

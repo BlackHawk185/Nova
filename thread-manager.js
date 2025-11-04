@@ -1,5 +1,6 @@
 import { Redis } from "@upstash/redis";
 import OpenAI from "openai";
+import config from "./config.js";
 
 // Simple Assistants Thread Manager with inactivity timeout and message cap
 export default class ThreadManager {
@@ -8,10 +9,17 @@ export default class ThreadManager {
     this.inactivityMs = inactivityMs;
     this.maxMessages = maxMessages;
 
-    // Redis optional
+    // Redis optional - use config with hardcoded fallbacks
     try {
-      this.redis = Redis.fromEnv();
-      this.redisAvailable = true;
+      const url = config.upstashUrl || process.env.UPSTASH_REDIS_REST_URL;
+      const token = config.upstashToken || process.env.UPSTASH_REDIS_REST_TOKEN;
+      
+      if (url && token) {
+        this.redis = new Redis({ url, token });
+        this.redisAvailable = true;
+      } else {
+        throw new Error('Redis credentials not available');
+      }
     } catch (err) {
       this.redisAvailable = false;
       this._store = new Map();
@@ -19,7 +27,7 @@ export default class ThreadManager {
     }
 
     // OpenAI for thread operations (delete, create)
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = config.openaiApiKey || process.env.OPENAI_API_KEY;
     this.openai = apiKey ? new OpenAI({ apiKey }) : null;
   }
 
