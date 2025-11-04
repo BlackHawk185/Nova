@@ -2,8 +2,21 @@
 // Replaces Nova's custom pipeline with OpenAI Assistants API integration
 // npm install openai axios
 import OpenAI from 'openai';
+import config from './config.js';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Lazy-load OpenAI client to ensure config is loaded first
+let openai;
+function getOpenAI() {
+  if (!openai) {
+    const apiKey = config.openaiApiKey || process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY is required but not found in config or environment');
+    }
+    openai = new OpenAI({ apiKey });
+  }
+  return openai;
+}
+
 const ASSISTANT_ID = process.env.NOVA_ASSISTANT_ID || 'asst_gNwlaKVPMnTeORVkbXs5EqeV'; // Hardcoded fallback
 
 // Optional HTTP fallback for tool handling if no toolExecutor is provided
@@ -24,7 +37,7 @@ export async function runAssistantPipeline({ userInput, threadId, toolExecutor, 
   // Create or continue a thread
   const thread = (threadId && threadId.trim())
     ? { id: threadId }
-    : await openai.beta.threads.create();
+    : await getOpenAI().beta.threads.create();
 
   console.log(`[DEBUG] thread created/used: ${JSON.stringify(thread)}`);
   
@@ -34,7 +47,7 @@ export async function runAssistantPipeline({ userInput, threadId, toolExecutor, 
 
   // Add user message (only if we have input)
   if (userInput.trim()) {
-    await openai.beta.threads.messages.create(currentThreadId, {
+    await getOpenAI().beta.threads.messages.create(currentThreadId, {
       role: 'user',
       content: userInput
     });
@@ -56,7 +69,7 @@ export async function runAssistantPipeline({ userInput, threadId, toolExecutor, 
   }
 
   // Run the assistant with tool_choice to force function calling when appropriate
-  const run = await openai.beta.threads.runs.create(currentThreadId, {
+  const run = await getOpenAI().beta.threads.runs.create(currentThreadId, {
     assistant_id: ASSISTANT_ID,
     additional_instructions: addl.join(' '),
     tool_choice: actionContext === 'email' ? 'required' : 'auto'
@@ -70,7 +83,7 @@ export async function runAssistantPipeline({ userInput, threadId, toolExecutor, 
   while (status !== 'completed' && status !== 'failed' && status !== 'cancelled' && status !== 'requires_action') {
     await new Promise(r => setTimeout(r, 1500));
     console.log(`[DEBUG] About to retrieve run with currentThreadId: ${currentThreadId}, run.id: ${run.id}`);
-    runResult = await openai.beta.threads.runs.retrieve(run.id, { thread_id: currentThreadId });
+    runResult = await getOpenAI().beta.threads.runs.retrieve(run.id, { thread_id: currentThreadId });
     status = runResult.status;
     console.log(`[DEBUG] Run status: ${status}`);
   }
@@ -110,14 +123,14 @@ export async function runAssistantPipeline({ userInput, threadId, toolExecutor, 
     
     // Submit tool outputs
     console.log(`[DEBUG] Submitting ${toolOutputs.length} tool outputs`);
-    await openai.beta.threads.runs.submitToolOutputs(run.id, { thread_id: currentThreadId, tool_outputs: toolOutputs });
+    await getOpenAI().beta.threads.runs.submitToolOutputs(run.id, { thread_id: currentThreadId, tool_outputs: toolOutputs });
     
     // Poll again for completion after tool outputs
     let finalStatus = 'in_progress';
     let finalRunResult = runResult;
     while (finalStatus !== 'completed' && finalStatus !== 'failed' && finalStatus !== 'cancelled') {
       await new Promise(r => setTimeout(r, 1500));
-      finalRunResult = await openai.beta.threads.runs.retrieve(run.id, { thread_id: currentThreadId });
+      finalRunResult = await getOpenAI().beta.threads.runs.retrieve(run.id, { thread_id: currentThreadId });
       finalStatus = finalRunResult.status;
       console.log(`[DEBUG] Post-tool status: ${finalStatus}`);
     }
@@ -125,7 +138,7 @@ export async function runAssistantPipeline({ userInput, threadId, toolExecutor, 
   }
 
   // Get the latest message from the assistant
-  const messages = await openai.beta.threads.messages.list(currentThreadId);
+  const messages = await getOpenAI().beta.threads.messages.list(currentThreadId);
   const lastMsg = messages.data.find(m => m.role === 'assistant');
   
   console.log(`[DEBUG] Executed tools: ${executedTools.length > 0 ? executedTools.join(', ') : 'none'}`);
