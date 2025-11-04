@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Setup OpenAI Assistant",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"setup-assistant"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$eslint-stylish"
+			],
+			"group": "build"
+		}
+	]
+}

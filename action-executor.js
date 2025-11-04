@@ -1,5 +1,6 @@
 import config from "./config.js";
 import EmailFormatter from "./email-formatter.js";
+import SchedulingService from "./scheduling.js";
 
 const DEFAULT_EMAIL_LIMIT = 5;
 
@@ -8,9 +9,8 @@ function normalizePhone(value) {
 }
 
 export default class ActionExecutor {
-	constructor({ emailService, memory, schedulingService, logger = console } = {}) {
+	constructor({ emailService, schedulingService, logger = console } = {}) {
 		this.emailService = emailService;
-		this.memory = memory;
 		this.schedulingService = schedulingService;
 		this.logger = logger;
 
@@ -28,9 +28,8 @@ export default class ActionExecutor {
 			move_email: this.handleMoveEmail.bind(this),
 			unsubscribe_email: this.handleUnsubscribeEmail.bind(this),
 			schedule_reminder: this.handleScheduleReminder.bind(this),
+			check_reminders: this.handleCheckReminders.bind(this),
 			add_task: this.handleAddTask.bind(this),
-			check_calendar: this.handleUnsupportedAction.bind(this, "Calendar checks are not implemented yet."),
-			web_search: this.handleUnsupportedAction.bind(this, "Web search is not available in this build."),
 		};
 	}
 
@@ -97,7 +96,7 @@ export default class ActionExecutor {
 
 		const result = await this.emailService.sendEmail({
 			to: process.env.MY_NUMBER ? `${process.env.MY_NUMBER}@msg.fi.google.com` : 'stephen@valenceapp.net',
-			subject: 'Nova Update',
+			subject: '', // Blank subject for natural SMS-like conversation
 			body: message,
 			accountId: 'nova-sms'
 		});
@@ -234,6 +233,38 @@ export default class ActionExecutor {
 		return { task, delayMs, context, category, id };
 	}
 
+	async handleCheckReminders(plan) {
+		if (!this.schedulingService) {
+			throw new Error("Scheduling service not configured");
+		}
+
+		const reminders = await this.schedulingService.getPendingReminders();
+		
+		if (reminders.length === 0) {
+			return { 
+				success: true, 
+				reminders: [], 
+				message: "You have no upcoming reminders scheduled." 
+			};
+		}
+
+		// Format reminders for Nova's response
+		const formattedReminders = reminders.map(r => ({
+			task: r.task,
+			scheduledFor: r.scheduledFor,
+			mergedCount: r.mergedCount,
+			timeUntil: r.timeUntil,
+			details: r.details || null
+		}));
+
+		return { 
+			success: true, 
+			reminders: formattedReminders,
+			count: reminders.length,
+			message: `You have ${reminders.length} upcoming reminder${reminders.length > 1 ? 's' : ''}.`
+		};
+	}
+
 	// Helper method for scheduling daily summaries at 6 PM
 	async scheduleDailySummary(task, category = "daily_summary") {
 		if (!this.schedulingService) {
@@ -257,11 +288,6 @@ export default class ActionExecutor {
 
 		await this.memory.addTask(task, plan.due_date || plan.dueDate, plan.priority || "medium");
 		return { task, dueDate: plan.due_date || plan.dueDate, priority: plan.priority || "medium" };
-	}
-
-	async handleUnsupportedAction(message, plan) {
-		await this.notifyOwner(message || "Action not available", { force: true });
-		return { warning: message, skipOwnerNotification: true };
 	}
 
 	async notifyOwnerIfNeeded(plan, handlerResult = {}) {
@@ -292,7 +318,7 @@ export default class ActionExecutor {
 			await this.emailService.sendEmail({
 				accountId: 'nova-sms',
 				to: googleFiEmail,
-				subject: 'Nova Update',
+				subject: '', // Blank subject for natural SMS-like conversation
 				body: message
 			});
 			
@@ -323,6 +349,23 @@ export default class ActionExecutor {
 	parseDelay(text) {
 		if (!text || typeof text !== "string") return null;
 
+		// Handle specific times like "6pm", "18:00", "9am"
+		const timePattern = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i;
+		const timeMatch = text.toLowerCase().match(timePattern);
+		if (timeMatch) {
+			let hour = parseInt(timeMatch[1]);
+			const minute = parseInt(timeMatch[2] || "0");
+			const period = timeMatch[3]?.toLowerCase();
+			
+			// Convert to 24-hour format
+			if (period === "pm" && hour !== 12) hour += 12;
+			if (period === "am" && hour === 12) hour = 0;
+			
+			// Import SchedulingService to use the time helper
+			return SchedulingService.getDelayUntilTime(hour, minute);
+		}
+		
+		// Handle relative delays like "2 hours", "30 minutes"
 		const pattern = /(\d+(?:\.\d+)?)\s*(second|minute|hour|day|week|month)s?/i;
 		const match = text.match(pattern);
 		if (match) {

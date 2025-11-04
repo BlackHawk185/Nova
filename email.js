@@ -79,6 +79,57 @@ class UniversalEmailService {
    * Load email accounts from environment variables
    */
   loadAccounts() {
+    // Hardcoded accounts - fallback to env vars if available
+    const hardcodedAccounts = [
+      {
+        id: 'personal',
+        name: 'Stephen Michaud',
+        host: 'imap.mail.com',
+        port: 993,
+        secure: true,
+        user: 'stephenmichaud@email.com',
+        pass: 'Asha11981',
+        smtpHost: 'smtp.mail.com',
+        smtpPort: 587,
+        smtpSecure: false,
+        authType: 'password',
+        useIdle: true
+      },
+      {
+        id: 'work',
+        name: 'Stephen Michaud (Work)',
+        host: 'imap.gmail.com',
+        port: 993,
+        secure: true,
+        user: 'stephen@valenceapp.net',
+        smtpHost: 'smtp.gmail.com',
+        smtpPort: 587,
+        smtpSecure: false,
+        authType: 'oauth2',
+        clientId: '58014931679-e7c2hjcpbecunf54vo6lu2gtlhqdsut0.apps.googleusercontent.com',
+        clientSecret: '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',
+        refreshToken: '1//04anudVMu_OrfCgYIARAAGAQSNwF-L9IrbYw-IDes_wEN68HXnQiZbUkMtjc7Ek6dOnIXIXVF3pYA8CnpP-VhEsuVIvzWTjCfAIE',
+        useIdle: true
+      },
+      {
+        id: 'nova-sms',
+        name: 'Nova SMS Gateway',
+        host: 'imap.gmail.com',
+        port: 993,
+        secure: true,
+        user: 'nova806a6bd1@gmail.com',
+        smtpHost: 'smtp.gmail.com',
+        smtpPort: 587,
+        smtpSecure: false,
+        authType: 'oauth2',
+        clientId: '58014931679-e7c2hjcpbecunf54vo6lu2gtlhqdsut0.apps.googleusercontent.com',
+        clientSecret: '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',
+        refreshToken: '1//04mR2FH-EmtHeCgYIARAAGAQSNwF-L9IrCf5IG-rLw2Ysm5o_vJI0pdBLB6uN9UVMDFpFrje0j5WIQ9GmA32eosZnExLgYZaVhXw',
+        useIdle: true
+      }
+    ];
+    
+    // Try to load from env first, fallback to hardcoded
     const accounts = [];
     
     // Check for up to 4 email accounts in .env
@@ -116,8 +167,14 @@ class UniversalEmailService {
       }
     }
 
+    // If no env accounts found, use hardcoded accounts
     if (accounts.length === 0) {
-      console.warn('⚠️ No email accounts configured. Add EMAIL_* variables to .env');
+      console.log('📧 No env accounts found, using hardcoded accounts');
+      accounts.push(...hardcodedAccounts);
+      hardcodedAccounts.forEach(acc => {
+        const authMethod = acc.authType === 'oauth2' ? 'OAuth2' : 'Password';
+        console.log(`📧 Loaded email account: ${acc.id} (${acc.user}) [${authMethod}]`);
+      });
     }
 
     return accounts;
@@ -428,7 +485,7 @@ class UniversalEmailService {
     return new Promise(async (resolve, reject) => {
       const imap = await this.getImapClient(accountId);
 
-      console.log(`📧 Marking email ${emailId} as read in account: ${accountId}`);
+      console.log(`📧 Marking email with UID ${emailId} as read in account: ${accountId}`);
 
       imap.once('ready', () => {
         imap.openBox('INBOX', false, (err, box) => {
@@ -461,7 +518,7 @@ class UniversalEmailService {
     return new Promise(async (resolve, reject) => {
       const imap = await this.getImapClient(accountId);
 
-      console.log(`📧 Marking email ${emailId} as unread in account: ${accountId}`);
+      console.log(`📧 Marking email with UID ${emailId} as unread in account: ${accountId}`);
 
       imap.once('ready', () => {
         imap.openBox('INBOX', false, (err, box) => {
@@ -495,7 +552,7 @@ class UniversalEmailService {
       let imap;
       try {
         imap = await this.getImapClient(accountId);
-        console.log(`📧 Deleting email ${emailId} in account: ${accountId}`);
+        console.log(`📧 Deleting email with UID ${emailId} in account: ${accountId}`);
 
         imap.once('ready', () => {
           imap.openBox('INBOX', false, (err, box) => {
@@ -507,11 +564,13 @@ class UniversalEmailService {
 
             console.log(`📧 INBOX opened, total messages: ${box.messages.total}`);
 
-            // First, verify the email exists
-            const fetch = imap.seq.fetch(emailId, { bodies: 'HEADER.FIELDS (SUBJECT)' });
+            // First, verify the email exists (emailId is a UID)
+            const fetch = imap.fetch(emailId, { bodies: 'HEADER.FIELDS (SUBJECT)' });
+            let messageFound = false;
             
             fetch.on('message', (msg, seqno) => {
-              console.log(`📧 Found email ${seqno} to delete`);
+              messageFound = true;
+              console.log(`📧 Found email with UID ${emailId} (seqno ${seqno}) to delete`);
               
               // For Gmail, move to [Gmail]/Trash instead of expunging
               if (this.accounts.find(acc => acc.id === accountId)?.host?.includes('gmail')) {
@@ -601,6 +660,11 @@ class UniversalEmailService {
             fetch.on('end', () => {
               // If no messages were found
               console.log(`📧 Fetch completed for email ${emailId}`);
+              if (!messageFound) {
+                console.log(`📧 Email ${emailId} not found (may have been already deleted)`);
+                imap.end();
+                resolve(true); // Consider it successful if already gone
+              }
             });
           });
         });
@@ -627,7 +691,7 @@ class UniversalEmailService {
     return new Promise(async (resolve, reject) => {
       const imap = await this.getImapClient(accountId);
 
-      console.log(`📧 Marking email ${emailId} as spam in account: ${accountId}`);
+      console.log(`📧 Marking email with UID ${emailId} as spam in account: ${accountId}`);
 
       imap.once('ready', () => {
         imap.openBox('INBOX', false, (err, box) => {
@@ -690,7 +754,7 @@ class UniversalEmailService {
     return new Promise(async (resolve, reject) => {
       const imap = await this.getImapClient(accountId);
 
-      console.log(`📧 Moving email ${emailId} to folder ${folder} in account: ${accountId}`);
+      console.log(`📧 Moving email with UID ${emailId} to folder ${folder} in account: ${accountId}`);
 
       imap.once('ready', () => {
         imap.openBox('INBOX', false, (err, box) => {
@@ -732,8 +796,8 @@ class UniversalEmailService {
             return reject(err);
           }
 
-          // Fetch full email content
-          const fetch = imap.seq.fetch(emailId, {
+          // Fetch full email content using UID
+          const fetch = imap.fetch(emailId, {
             bodies: '',
             struct: true
           });

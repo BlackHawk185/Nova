@@ -89,6 +89,13 @@ class EmailFormatter {
    * Build context for incoming email processing
    */
   static buildIncomingEmailContext(email, accountId) {
+    // nova-sms should be treated as direct conversation, not email processing
+    if (accountId === 'nova-sms') {
+      const cleanContent = this.cleanEmailContent(email.text);
+      return cleanContent; // Just return the message content for direct conversation
+    }
+
+    // For work/personal email accounts, use email processing prompts
     if (email.isThread) {
       return `EMAIL CONVERSATION THREAD RECEIVED in ${accountId} account:
 Subject: ${email.subject}

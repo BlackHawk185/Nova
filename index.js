@@ -1,34 +1,27 @@
 import express from "express";
 import bodyParser from "body-parser";
-import dotenv from "dotenv";
 import config, { dumpConfigSummary } from "./config.js";
-import NovaMemory from "./memory.js";
 import UniversalEmailService from "./email.js";
-import GoogleOAuth from "./google-oauth.js";
-import NovaBrain from "./nova-brain.js";
 import SchedulingService from "./scheduling.js";
 import ActionExecutor from "./action-executor.js";
-import ConversationHistory from "./conversation-history.js";
 import EmailFormatter from "./email-formatter.js";
 import { createRoutes } from "./routes.js";
+import { runAssistantPipeline } from "./assistant-pipeline.js";
+import ThreadManager from "./thread-manager.js";
 
-dotenv.config();
+// dotenv is already loaded by config.js
 
 // Init services
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-const memory = new NovaMemory();
 const emailService = new UniversalEmailService();
-const googleOAuth = new GoogleOAuth();
-const novaBrain = new NovaBrain();
 const schedulingService = new SchedulingService();
-const conversationHistory = new ConversationHistory();
+const threadManager = new ThreadManager();
 
 const actionExecutor = new ActionExecutor({
   emailService,
-  memory,
   schedulingService,
 });
 
@@ -57,6 +50,7 @@ async function getRecentEmailContext() {
   }
 }
 
+// Simplified pipeline using OpenAI Assistants API
 async function runNovaPipeline({
   userInput,
   channel = "sms",
@@ -70,67 +64,28 @@ async function runNovaPipeline({
   const trimmedInput = userInput.toString().trim();
 
   try {
-    console.log(`🧠 Nova pipeline started: "${trimmedInput}" (${channel})`);
+    console.log(`� Assistant pipeline started: "${trimmedInput}" (${channel})`);
     
-    const recentConversation = await conversationHistory.getConversationHistory();
-    console.log(`📖 Recent conversation context: ${recentConversation ? 'loaded' : 'empty'}`);
-    
-    const memoryQueryResult = await novaBrain.generateMemoryQueries({
+    // Use OpenAI Assistant for reasoning and tool calls
+    const result = await runAssistantPipeline({ 
       userInput: trimmedInput,
-      recentConversation,
-    });
-    
-    console.log(`🔍 Memory queries generated:`, {
-      queries: memoryQueryResult.queries,
-      reasoning: memoryQueryResult.reasoning
-    });
-
-    const memoryResults = await fetchRelevantMemories(memoryQueryResult.queries || []);
-    console.log(`💭 Retrieved ${memoryResults.length} memory snippets`);
-    
-    // Use Nova's AI-powered memory curation
-    const curationResult = await novaBrain.curateMemories(memoryResults);
-    const curatedMemories = curationResult.curatedMemories;
-    
-    // Apply memory deletions/updates from curation
-    if (curationResult.memoryOperations) {
-      await applyMemoryUpdates(curationResult.memoryOperations);
-    }
-    
-    console.log(`✨ Curated to ${curatedMemories.length} relevant memories`);
-
-    console.log(`🤖 Nova reasoning with context:`, {
-      input: trimmedInput,
+      threadId: metadata.threadId, // Persistent conversation context
+      toolExecutor: (plan) => actionExecutor.executeAction(plan),
       actionContext,
-      memoriesCount: curatedMemories.length,
-      hasConversation: !!recentConversation
+      metadata
     });
-
-    const response = await novaBrain.respond({
-      userInput: trimmedInput,
-      recentConversation,
-      memories: curatedMemories,
-      actionContext,
-    });
-
-    const memoryOps = await applyMemoryUpdates(response.memory);
-    await conversationHistory.addToConversationHistory(trimmedInput, response.response);
-
-    const execution = await actionExecutor.executeAction(response);
-
+    
+    console.log(`✅ Assistant responded: ${result.text}`);
+    
     return {
       channel,
       actionContext,
-      response,
-      execution,
-      memoryQueries: memoryQueryResult.queries,
-      memoryReasoning: memoryQueryResult.reasoning,
-      memoriesUsed: curatedMemories,
-      memoryOps,
+      response: { response: result.text, action: (result.actions && result.actions[0]) || undefined },
+      threadId: result.threadId,
       metadata,
     };
   } catch (error) {
-    console.error("❌ Nova pipeline error:", error);
+    console.error("❌ Assistant pipeline error:", error);
     await actionExecutor.executeAction({
       action: "send_email",
       to: `${process.env.MY_NUMBER}@msg.fi.google.com`,
@@ -144,84 +99,7 @@ async function runNovaPipeline({
   }
 }
 
-async function fetchRelevantMemories(queries) {
-  if (!Array.isArray(queries) || queries.length === 0) {
-    return [];
-  }
-
-  const seen = new Set();
-  const collected = [];
-
-  for (const query of queries) {
-    if (!query || !query.trim()) continue;
-
-    try {
-      const results = await memory.searchMemories(query.trim(), 8);
-      for (const item of results || []) {
-        const id = item.id || item.memory_id || item.uuid || item._id;
-        if (id && seen.has(id)) continue;
-        if (id) seen.add(id);
-        collected.push(item);
-      }
-    } catch (error) {
-      console.error("Error searching memories for query", query, error.message);
-    }
-  }
-
-  return collected;
-}
-
-async function applyMemoryUpdates(delta = {}) {
-  const summary = {
-    added: [],
-    updated: [],
-    deleted: [],
-  };
-
-  if (!delta || typeof delta !== "object") {
-    return summary;
-  }
-
-  if (Array.isArray(delta.add)) {
-    for (const text of delta.add) {
-      if (typeof text !== "string" || text.trim() === "") continue;
-      try {
-        const result = await memory.addMemory(text.trim());
-        summary.added.push({ text, result });
-      } catch (error) {
-        console.error("Failed to add memory:", error.message);
-      }
-    }
-  }
-
-  if (Array.isArray(delta.update)) {
-    for (const entry of delta.update) {
-      if (!entry || !entry.id || typeof entry.text !== "string") continue;
-      const trimmed = entry.text.trim();
-      if (!trimmed) continue;
-      try {
-        const result = await memory.updateMemory(entry.id, trimmed);
-        summary.updated.push({ id: entry.id, result });
-      } catch (error) {
-        console.error("Failed to update memory:", entry.id, error.message);
-      }
-    }
-  }
-
-  if (Array.isArray(delta.delete)) {
-    for (const id of delta.delete) {
-      if (!id) continue;
-      try {
-        const result = await memory.deleteMemory(id);
-        summary.deleted.push({ id, result });
-      } catch (error) {
-        console.error("Failed to delete memory:", id, error.message);
-      }
-    }
-  }
-
-  return summary;
-}
+// Old memory functions removed - OpenAI Assistant handles memory natively
 
 // === INCOMING EMAIL HANDLER ===
 async function handleIncomingEmail({ accountId, email, type }) {
@@ -243,19 +121,25 @@ async function handleIncomingEmail({ accountId, email, type }) {
       console.log(`   Thread Length: ${email.threadLength} messages`);
     }
     console.log(`   Content: ${email.text?.replace(/--[0-9a-f]+/g, '').replace(/Content-Type:[^\n]+/g, '').replace(/boundary="[^"]*"/g, '').trim().substring(0, 150) || 'No content'}...`);
-    console.log(`   Action Context: EMAIL (limited actions)`);
     
-    // Let Nova decide how to handle the incoming email with limited action set
+    // nova-sms should be treated as direct messages (inbox), not emails to manage
+    const isDirectMessage = accountId === 'nova-sms';
+    const channel = isDirectMessage ? "inbox" : "email";
+    const actionContext = isDirectMessage ? "general" : "email";
+    
+    console.log(`   Action Context: ${actionContext.toUpperCase()} (${isDirectMessage ? 'direct conversation' : 'limited actions'})`);
+    
+    // Let Nova decide how to handle the incoming email/message
     const pipelineResult = await runNovaPipeline({
       userInput: emailContext,
-      channel: "email",
-      actionContext: "email",
+      channel,
+      actionContext,
       metadata: { accountId, subject: email.subject, isThread: email.isThread, threadLength: email.threadLength },
     });
-    console.log(`💭 Nova's decision for ${email.isThread ? 'email thread' : 'email'} "${email.subject}":`);
-    console.log(`   Action: ${pipelineResult.response.action}`);
-    console.log(`   Message: ${pipelineResult.response.response}`);
-    console.log(`   Context: Email processing (restricted actions)`);
+    console.log(`💭 Nova processed email: "${email.subject}"`);
+    console.log(`   Decision: ${pipelineResult.response.action ? `Execute ${pipelineResult.response.action}` : 'No action taken'}`);
+    console.log(`   Reasoning: ${pipelineResult.response.response}`);
+    console.log(`   Context: ${accountId === 'nova-sms' ? 'Direct conversation (full actions)' : 'Email processing (restricted actions)'}`);
     console.log(`   Memory queries: ${JSON.stringify(pipelineResult.memoryQueries)}`);
     
   } catch (error) {
@@ -277,7 +161,6 @@ const routes = createRoutes({
   runNovaPipeline,
   actionExecutor,
   emailService,
-  googleOAuth,
   handleIncomingEmail,
 });
 app.use('/', routes);
@@ -298,7 +181,7 @@ async function startServer() {
     app.listen(PORT, () => {
       console.log(`Nova AI Secretary running on port ${PORT}`);
       console.log("Personality: Skeptical, dry-witted, concise");
-      console.log("Memory: Mem0 + Upstash Redis");
+      console.log("Context: OpenAI Assistants threads (ThreadManager + Redis)");
       console.log("Ready to serve Stephen with no-nonsense efficiency");
     });
   } catch (error) {
@@ -309,6 +192,75 @@ async function startServer() {
 
 // Start the server
 startServer();
+
+// === INTERACTIVE DEBUG MODE ===
+if (process.env.NODE_ENV !== 'production') {
+  import('readline').then((readline) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: 'Nova> '
+    });
+
+    console.log('\n🔧 DEBUG MODE: Type messages to send to Nova (or "exit" to quit)');
+    rl.prompt();
+
+  // Persist a thread across debug messages using ThreadManager with inactivity expiry
+  const debugContextId = 'terminal-debug';
+  let debugThreadId = null; // stored for quick display; authoritative state kept in ThreadManager
+
+  rl.on('line', async (input) => {
+      const trimmed = input.trim();
+      
+      if (trimmed === 'exit' || trimmed === 'quit') {
+        console.log('👋 Exiting Nova...');
+        process.exit(0);
+      }
+      
+      if (trimmed) {
+        // Support a manual reset command
+        if (trimmed.toLowerCase() === 'reset') {
+          const rotated = await threadManager.reset(debugContextId);
+          debugThreadId = rotated.threadId;
+          console.log(`🔄 Thread reset. New thread: ${debugThreadId}`);
+          console.log('');
+          rl.prompt();
+          return;
+        }
+
+        try {
+          console.log(`\n📤 Sending to Nova: "${trimmed}"`);
+          // Acquire or rotate thread based on inactivity/message count
+          const { threadId } = await threadManager.getOrCreateThread(debugContextId);
+          const result = await runNovaPipeline({
+            userInput: trimmed,
+            channel: "inbox",
+            actionContext: "general",
+            metadata: { source: "terminal-debug", threadId }
+          });
+          console.log(`✅ Nova responded: ${result.response.response}`);
+          if (result.response.action) {
+            console.log(`🎯 Action taken: ${result.response.action}`);
+          }
+          // Update usage stats and cache threadId for display
+          await threadManager.touch(debugContextId, { threadId: result.threadId, messagesDelta: 1 });
+          debugThreadId = result.threadId || threadId || debugThreadId;
+          console.log(`🧵 Thread: ${debugThreadId}`);
+        } catch (error) {
+          console.error(`❌ Error: ${error.message}`);
+        }
+      }
+      
+      console.log(''); // blank line for readability
+      rl.prompt();
+    });
+
+    rl.on('close', () => {
+      console.log('\n👋 Nova debug session ended');
+      process.exit(0);
+    });
+  });
+}
 
 // === GRACEFUL SHUTDOWN ===
 process.on('SIGINT', () => {

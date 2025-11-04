@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "setup-assistant": "node setup-openai-assistant.js"
   },
   "keywords": [
     "ai",
@@ -20,6 +21,7 @@
   "description": "Nova - AI Secretary Framework. A persistent AI assistant that acts as a no-nonsense secretary.",
   "dependencies": {
     "@upstash/redis": "^1.35.4",
+    "axios": "^1.12.2",
     "body-parser": "^2.2.0",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
@@ -27,9 +29,7 @@
     "googleapis": "^160.0.0",
     "imap": "^0.8.19",
     "mailparser": "^3.7.4",
-    "mem0ai": "^2.1.38",
     "nodemailer": "^7.0.6",
-    "open": "^10.2.0",
     "openai": "^5.23.0"
   }
 }

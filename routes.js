@@ -1,58 +1,31 @@
 import express from "express";
 
-export function createRoutes({ runNovaPipeline, actionExecutor, emailService, googleOAuth }) {
+export function createRoutes({ runNovaPipeline, actionExecutor, emailService }) {
   const router = express.Router();
 
-  // === GOOGLE OAUTH SETUP ===
-  router.get("/auth/google", (req, res) => {
-    if (googleOAuth.hasValidTokens()) {
-      res.json({ 
-        status: "Google OAuth already configured",
-        message: "Gmail integration is ready"
-      });
-      return;
-    }
-    
-    const authUrl = googleOAuth.getAuthUrl();
+  // === HEALTH CHECK (for Railway/monitoring) ===
+  router.get("/", (req, res) => {
     res.json({
-      status: "OAuth setup required",
-      message: "Visit this URL to authorize Nova to access Gmail",
-      authUrl: authUrl,
-      instructions: "1. Visit the auth URL, 2. Sign in with your work account, 3. Grant permissions, 4. You'll be redirected back to Nova"
+      status: "ok",
+      service: "Nova AI Secretary",
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString()
     });
   });
 
-  router.get("/auth/google/callback", async (req, res) => {
-    try {
-      const { code } = req.query;
-      if (!code) {
-        return res.status(400).json({ error: "Authorization code not provided" });
-      }
-      
-      await googleOAuth.exchangeCodeForTokens(code);
-      
-      res.json({
-        status: "success",
-        message: "✅ Google OAuth configured! Gmail integration is now active. You can close this window."
-      });
-      
-      console.log("✅ Google OAuth setup completed successfully");
-    } catch (error) {
-      console.error("❌ OAuth callback error:", error.message);
-      res.status(500).json({
-        status: "error",
-        message: "OAuth setup failed: " + error.message
-      });
-    }
+  router.get("/health", (req, res) => {
+    res.json({
+      status: "healthy",
+      accounts: emailService.listAccounts().length,
+      uptime: process.uptime()
+    });
   });
 
+  // === AUTH STATUS ===
   router.get("/auth/status", (req, res) => {
     res.json({
-      googleOAuth: googleOAuth.hasValidTokens(),
       accounts: emailService.listAccounts(),
-      message: googleOAuth.hasValidTokens() 
-        ? "Gmail OAuth is configured and ready"
-        : "Gmail OAuth setup required - visit /auth/google"
+      message: "Email service is ready"
     });
   });
 
